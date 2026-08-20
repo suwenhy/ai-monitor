@@ -1,9 +1,22 @@
-const { app, BrowserWindow, ipcMain, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, screen, shell } = require("electron");
 const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { promisify } = require("node:util");
+const {
+  appIdFromExecutable,
+  desktopCandidatesFromCli,
+  isClaudeCliPath,
+  isClaudeDesktopAlias,
+  packageExecutableCandidates,
+  parsePowerShellJson,
+  processExecutableCandidates,
+  registeredExecutableCandidates,
+  startAppId,
+  versionedExecutableCandidates,
+} = require("./windows-discovery.cjs");
+const { emptySettings, normalizeSettings, validateSettings } = require("./settings.cjs");
 
 const execFileAsync = promisify(execFile);
 const REFRESH_INTERVAL_MS = 3_000;
@@ -12,6 +25,7 @@ const MAX_READ_BYTES = 4 * 1024 * 1024;
 const CODEX_APPROVAL_GRACE_MS = REFRESH_INTERVAL_MS * 2;
 const CLAUDE_RECENT_ACTIVITY_MS = 15_000;
 const CLAUDE_USAGE_STALE_MS = 30 * 60_000;
+const WINDOWS_DISCOVERY_TTL_MS = 5 * 60_000;
 const CLAUDE_USAGE_KEYS = {
   fh: "fiveHour",
   sd: "sevenDay",
@@ -30,6 +44,9 @@ let refreshTimer = null;
 let lastSnapshot = null;
 let refreshPromise = null;
 let appIsQuitting = false;
+let windowsDiscoveryCache = null;
+let windowsDiscoveryPromise = null;
+let monitorSettings = null;
 
 function exists(target) {
   return fs.access(target).then(() => true).catch(() => false);
@@ -102,6 +119,64 @@ async function launchCliSession(provider, session) {
   }
 }
 
+function settingsFilePath() {
+  return path.join(app.getPath("userData"), "settings.json");
+}
+
+async function loadMonitorSettings() {
+  if (monitorSettings) return monitorSettings;
+  try {
+    const value = JSON.parse(await fs.readFile(settingsFilePath(), "utf8"));
+    monitorSettings = normalizeSettings(value);
+  } catch {
+    monitorSettings = emptySettings();
+  }
+  return monitorSettings;
+}
+
+async function saveMonitorSettings(value) {
+  const validation = await validateSettings(value);
+  if (!validation.valid) return { ok: false, errors: validation.errors };
+  try {
+    await fs.mkdir(app.getPath("userData"), { recursive: true });
+    await fs.writeFile(settingsFilePath(), `${JSON.stringify(validation.settings, null, 2)}\n`, "utf8");
+    monitorSettings = validation.settings;
+    return { ok: true, settings: monitorSettings };
+  } catch (error) {
+    return { ok: false, error: normalizeError(error), errors: {} };
+  }
+}
+
+async function applyPathOverride(configured, detected, label, errors) {
+  if (!configured) return { path: detected, overridden: false };
+  if (await exists(configured)) return { path: configured, overridden: true };
+  errors.push(`${label} 的手动路径已失效，已回退自动检测`);
+  return { path: detected, overridden: false };
+}
+
+async function activateDesktopApp(provider) {
+  if (process.platform === "win32" && provider.desktopAppId) {
+    try {
+      await execFileAsync("explorer.exe", [`shell:AppsFolder\\${provider.desktopAppId}`], { timeout: 5_000 });
+      return null;
+    } catch {
+      // Fall back to the registered protocol or executable path.
+    }
+  }
+
+  if (process.platform === "win32" && provider.id === "claude") {
+    try {
+      await shell.openExternal("claude://");
+      return null;
+    } catch {
+      // Fall back to the executable path for legacy Squirrel installations.
+    }
+  }
+
+  if (!provider.desktopPath) return "未检测到桌面客户端";
+  return shell.openPath(provider.desktopPath);
+}
+
 async function firstExisting(candidates) {
   for (const candidate of unique(candidates)) {
     if (await exists(candidate)) return candidate;
@@ -109,16 +184,55 @@ async function firstExisting(candidates) {
   return null;
 }
 
-async function findExecutable(command, candidates) {
+async function locateExecutables(command) {
   try {
     const locator = process.platform === "win32" ? "where.exe" : "which";
     const { stdout } = await execFileAsync(locator, [command], { timeout: 2_000 });
-    const located = stdout.split(/\r?\n/).map((item) => item.trim()).find(Boolean);
-    if (located) return located;
+    const located = unique(stdout.split(/\r?\n/).map((item) => item.trim()));
+    if (process.platform !== "win32") return located;
+    const score = (target) => ({ ".cmd": 3, ".exe": 2, ".bat": 1 }[path.extname(target).toLowerCase()] || 0);
+    return located.sort((left, right) => score(right) - score(left));
   } catch {
     // Fall back to well-known installation locations.
+    return [];
   }
-  return firstExisting(candidates);
+}
+
+async function findExecutable(command, candidates, accept = () => true) {
+  const located = await locateExecutables(command);
+  return firstExisting([...located.filter(accept), ...candidates]);
+}
+
+async function readWindowsDiscoveryMetadata() {
+  if (process.platform !== "win32") return { packages: [], startApps: [], processes: [], registrations: [] };
+  if (windowsDiscoveryCache?.expiresAt > Date.now()) return windowsDiscoveryCache.value;
+  if (windowsDiscoveryPromise) return windowsDiscoveryPromise;
+
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$packages = @(Get-AppxPackage | Where-Object { ($_.Name + ' ' + $_.PackageFamilyName) -match 'OpenAI|Codex|ChatGPT|Anthropic|Claude' } | ForEach-Object { [PSCustomObject]@{ name = $_.Name; familyName = $_.PackageFamilyName; installLocation = $_.InstallLocation } })",
+    "$startApps = @(Get-StartApps | Where-Object { ($_.Name + ' ' + $_.AppID) -match 'OpenAI|Codex|ChatGPT|Anthropic|Claude' } | ForEach-Object { [PSCustomObject]@{ name = $_.Name; appId = $_.AppID } })",
+    "$processes = @(Get-Process | Where-Object { $_.ProcessName -match '^(ChatGPT|Codex|Claude)$' } | ForEach-Object { [PSCustomObject]@{ name = $_.ProcessName; path = $_.Path } })",
+    "$uninstallPaths = @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*', 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*', 'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*')",
+    "$registrations = @(Get-ItemProperty -Path $uninstallPaths | Where-Object { $_.DisplayName -match 'OpenAI|Codex|ChatGPT|Anthropic|Claude' } | ForEach-Object { [PSCustomObject]@{ name = $_.DisplayName; installLocation = $_.InstallLocation; displayIcon = $_.DisplayIcon } })",
+    "[PSCustomObject]@{ packages = $packages; startApps = $startApps; processes = $processes; registrations = $registrations } | ConvertTo-Json -Compress -Depth 4",
+  ].join("; ");
+
+  windowsDiscoveryPromise = execFileAsync("powershell.exe", [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    script,
+  ], { timeout: 8_000, windowsHide: true })
+    .then(({ stdout }) => parsePowerShellJson(stdout))
+    .catch(() => ({ packages: [], startApps: [], processes: [], registrations: [] }))
+    .then((value) => {
+      windowsDiscoveryCache = { value, expiresAt: Date.now() + WINDOWS_DISCOVERY_TTL_MS };
+      windowsDiscoveryPromise = null;
+      return value;
+    });
+  return windowsDiscoveryPromise;
 }
 
 function platformCandidates() {
@@ -137,19 +251,38 @@ function platformCandidates() {
   }
 
   if (process.platform === "win32") {
+    const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+    const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
     return {
       codexDesktop: [
         path.join(localAppData, "Programs", "ChatGPT", "ChatGPT.exe"),
         path.join(localAppData, "Programs", "Codex", "Codex.exe"),
+        path.join(localAppData, "Codex", "Codex.exe"),
+        path.join(programFiles, "Codex", "Codex.exe"),
+        path.join(programFiles, "ChatGPT", "ChatGPT.exe"),
+        path.join(programFilesX86, "Codex", "Codex.exe"),
         path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "ChatGPT.lnk"),
+      ],
+      codexDesktopVersionRoots: [
+        path.join(localAppData, "Codex"),
+        path.join(localAppData, "Programs", "Codex"),
+        path.join(localAppData, "Programs", "ChatGPT"),
       ],
       codexCli: [
         path.join(appData, "npm", "codex.cmd"),
+        homePath(".local", "bin", "codex.exe"),
         path.join(localAppData, "Programs", "codex", "codex.exe"),
       ],
       claudeDesktop: [
         path.join(localAppData, "Programs", "Claude", "Claude.exe"),
         path.join(localAppData, "AnthropicClaude", "Claude.exe"),
+        path.join(programFiles, "Claude", "Claude.exe"),
+        path.join(programFilesX86, "Claude", "Claude.exe"),
+      ],
+      claudeDesktopVersionRoots: [
+        path.join(localAppData, "AnthropicClaude"),
+        path.join(localAppData, "Programs", "Claude"),
+        path.join(localAppData, "Programs", "claude"),
       ],
       claudeCli: [path.join(appData, "npm", "claude.cmd"), homePath(".local", "bin", "claude.exe")],
       claudeDesktopData: [path.join(appData, "Claude"), path.join(localAppData, "Claude")],
@@ -163,6 +296,51 @@ function platformCandidates() {
     claudeCli: ["/usr/local/bin/claude", homePath(".local", "bin", "claude")],
     claudeDesktopData: [homePath(".config", "Claude"), homePath(".config", "claude")],
   };
+}
+
+async function resolveWindowsInstallations(provider, candidates) {
+  const command = provider === "codex" ? "codex" : "claude";
+  const [located, metadata, versioned] = await Promise.all([
+    locateExecutables(command),
+    readWindowsDiscoveryMetadata(),
+    versionedExecutableCandidates(
+      candidates[`${provider}DesktopVersionRoots`] || [],
+      provider === "codex" ? ["ChatGPT.exe", "Codex.exe"] : ["Claude.exe"],
+    ),
+  ]);
+  const cliCandidates = provider === "claude" ? located.filter(isClaudeCliPath) : located;
+  const cliPath = await firstExisting([...cliCandidates, ...candidates[`${provider}Cli`]]);
+  const inferredDesktop = unique([...located, cliPath].flatMap((item) => desktopCandidatesFromCli(provider, item)));
+  const aliases = provider === "claude" ? located.filter(isClaudeDesktopAlias) : [];
+  const packageCandidates = packageExecutableCandidates(provider, metadata.packages);
+  const processCandidates = processExecutableCandidates(provider, metadata.processes);
+  const registeredCandidates = registeredExecutableCandidates(provider, metadata.registrations);
+  const registeredAppId = startAppId(provider, metadata.startApps);
+  const desktopPath = await firstExisting([
+    ...candidates[`${provider}Desktop`],
+    ...versioned,
+    ...inferredDesktop,
+    ...processCandidates,
+    ...registeredCandidates,
+    ...packageCandidates,
+    ...aliases,
+  ]) || (registeredAppId ? packageCandidates[0] || null : null);
+  const desktopAppId = registeredAppId || appIdFromExecutable(provider, desktopPath);
+
+  return {
+    cliPath,
+    desktopPath,
+    desktopAppId,
+  };
+}
+
+async function resolveInstallations(provider, candidates) {
+  if (process.platform === "win32") return resolveWindowsInstallations(provider, candidates);
+  const [desktopPath, cliPath] = await Promise.all([
+    firstExisting(candidates[`${provider}Desktop`]),
+    findExecutable(provider, candidates[`${provider}Cli`]),
+  ]);
+  return { desktopPath, cliPath, desktopAppId: null };
 }
 
 async function listProcesses() {
@@ -194,12 +372,12 @@ function matchingProcesses(processes, provider) {
   const patterns = provider === "codex"
     ? [
         /\/ChatGPT\.app\/Contents\/MacOS\/ChatGPT(?:\s|$)/i,
-        /\\ChatGPT\.exe(?:\s|$)/i,
+        /(?:^|[\\/\s])ChatGPT\.exe(?:\s|$)/i,
         /(?:^|\s)(?:[A-Za-z]:\\[^\s"]*\\|\/[^\s"]*\/)?codex(?:\.exe)?(?:\s|$)/i,
       ]
     : [
         /\/Claude\.app\/Contents\/MacOS\/Claude(?:\s|$)/i,
-        /\\Claude\.exe(?:\s|$)/i,
+        /(?:^|[\\/\s])Claude\.exe(?:\s|$)/i,
         /(?:^|\s)(?:[A-Za-z]:\\[^\s"]*\\|\/[^\s"]*\/)?claude(?:\.exe)?(?:\s|$)/i,
       ];
   return processes
@@ -212,6 +390,7 @@ function matchingClaudeCodeProcesses(processes) {
   return processes
     .filter((item) => {
       const command = String(item.command || "");
+      if (process.platform === "win32" && /^claude\.exe$/i.test(command)) return false;
       if (command.startsWith("/Applications/Claude.app/")) return false;
       if (/^\/.*\/claude\.app\/Contents\/MacOS\/claude(?:\s|$)/.test(command)) return true;
       const executable = command.match(/^"([^"]+)"|^(\S+)/)?.slice(1).find(Boolean) || "";
@@ -631,13 +810,22 @@ async function readClaudePlanUsage(dataDirectories = []) {
   }
 }
 
-async function collectCodex(processes, candidates) {
-  const codexHome = process.env.CODEX_HOME || homePath(".codex");
-  const [desktopPath, cliPath, files] = await Promise.all([
-    firstExisting(candidates.codexDesktop),
-    findExecutable("codex", candidates.codexCli),
-    collectFiles(path.join(codexHome, "sessions"), ".jsonl"),
+async function collectCodex(processes, candidates, configured = {}) {
+  const detectedHome = process.env.CODEX_HOME || homePath(".codex");
+  const installation = await resolveInstallations("codex", candidates);
+  const errors = [];
+  const [desktop, cli, data] = await Promise.all([
+    applyPathOverride(configured.desktopPath, installation.desktopPath, "Codex Desktop", errors),
+    applyPathOverride(configured.cliPath, installation.cliPath, "Codex CLI", errors),
+    applyPathOverride(configured.dataHome, detectedHome, "Codex 数据目录", errors),
   ]);
+  const desktopPath = desktop.path;
+  const cliPath = cli.path;
+  const codexHome = data.path;
+  const desktopAppId = desktop.overridden
+    ? appIdFromExecutable("codex", desktopPath)
+    : installation.desktopAppId;
+  const files = await collectFiles(path.join(codexHome, "sessions"), ".jsonl");
   const runningProcesses = matchingProcesses(processes, "codex");
   const parsedSessions = await Promise.all(files.map(async (file) => parseCodexSession(file, await readJsonLines(file), runningProcesses.length > 0)));
   const sessions = parsedSessions.filter((session) => !session.internal).map(({ internal: _internal, ...session }) => session);
@@ -652,24 +840,42 @@ async function collectCodex(processes, candidates) {
   return {
     id: "codex",
     label: "Codex Desktop",
-    installed: Boolean(desktopPath || cliPath),
+    installed: Boolean(desktopPath || desktopAppId || cliPath),
     running: runningProcesses.length > 0,
     desktopPath,
+    desktopAppId,
     cliPath,
     dataHome: (await exists(codexHome)) ? codexHome : null,
+    pathOverrides: { desktop: desktop.overridden, cli: cli.overridden, data: data.overridden },
+    detectedPaths: {
+      desktopPath: installation.desktopPath,
+      cliPath: installation.cliPath,
+      dataHome: (await exists(detectedHome)) ? detectedHome : null,
+    },
     processes: runningProcesses,
     sessions,
     totals,
     stats: null,
-    errors: [],
+    errors,
   };
 }
 
-async function collectClaude(processes, candidates) {
-  const claudeHome = process.env.CLAUDE_CONFIG_DIR || homePath(".claude");
-  const [desktopPath, cliPath, files, stats, planUsage, desktopSessionIndex] = await Promise.all([
-    firstExisting(candidates.claudeDesktop),
-    findExecutable("claude", candidates.claudeCli),
+async function collectClaude(processes, candidates, configured = {}) {
+  const detectedHome = process.env.CLAUDE_CONFIG_DIR || homePath(".claude");
+  const installation = await resolveInstallations("claude", candidates);
+  const errors = [];
+  const [desktop, cli, data] = await Promise.all([
+    applyPathOverride(configured.desktopPath, installation.desktopPath, "Claude Desktop", errors),
+    applyPathOverride(configured.cliPath, installation.cliPath, "Claude CLI", errors),
+    applyPathOverride(configured.dataHome, detectedHome, "Claude 数据目录", errors),
+  ]);
+  const desktopPath = desktop.path;
+  const cliPath = cli.path;
+  const claudeHome = data.path;
+  const desktopAppId = desktop.overridden
+    ? appIdFromExecutable("claude", desktopPath)
+    : installation.desktopAppId;
+  const [files, stats, planUsage, desktopSessionIndex] = await Promise.all([
     collectFiles(path.join(claudeHome, "projects"), ".jsonl"),
     readClaudeStats(claudeHome),
     readClaudePlanUsage(candidates.claudeDesktopData),
@@ -703,11 +909,18 @@ async function collectClaude(processes, candidates) {
   return {
     id: "claude",
     label: "Claude Desktop",
-    installed: Boolean(desktopPath || cliPath),
+    installed: Boolean(desktopPath || desktopAppId || cliPath),
     running: runningProcesses.length > 0,
     desktopPath,
+    desktopAppId,
     cliPath,
     dataHome: (await exists(claudeHome)) ? claudeHome : null,
+    pathOverrides: { desktop: desktop.overridden, cli: cli.overridden, data: data.overridden },
+    detectedPaths: {
+      desktopPath: installation.desktopPath,
+      cliPath: installation.cliPath,
+      dataHome: (await exists(detectedHome)) ? detectedHome : null,
+    },
     processes: runningProcesses,
     codeProcesses,
     sessions,
@@ -715,16 +928,16 @@ async function collectClaude(processes, candidates) {
     totals: { ...sessionTotals, totalCostUsd },
     stats,
     planUsage,
-    errors: [],
+    errors,
   };
 }
 
 async function buildSnapshot() {
   const candidates = platformCandidates();
-  const processes = await listProcesses();
+  const [processes, settings] = await Promise.all([listProcesses(), loadMonitorSettings()]);
   const [codex, claude] = await Promise.all([
-    collectCodex(processes, candidates),
-    collectClaude(processes, candidates),
+    collectCodex(processes, candidates, settings.providers.codex),
+    collectClaude(processes, candidates, settings.providers.claude),
   ]);
   return {
     schemaVersion: 1,
@@ -943,6 +1156,44 @@ async function setMacDockIcon() {
 
 ipcMain.handle("monitor:get-snapshot", () => refreshSnapshot());
 ipcMain.handle("monitor:get-runtime", () => ({ platform: process.platform, packaged: app.isPackaged }));
+ipcMain.handle("monitor:get-settings", () => loadMonitorSettings());
+ipcMain.handle("monitor:save-settings", async (_event, value) => {
+  const result = await saveMonitorSettings(value);
+  if (result.ok) {
+    if (refreshPromise) await refreshPromise;
+    await refreshSnapshot();
+  }
+  return result;
+});
+ipcMain.handle("monitor:reset-settings", async () => {
+  const result = await saveMonitorSettings(emptySettings());
+  if (result.ok) {
+    if (refreshPromise) await refreshPromise;
+    await refreshSnapshot();
+  }
+  return result;
+});
+ipcMain.handle("monitor:pick-settings-path", async (_event, provider, key) => {
+  if (!["codex", "claude"].includes(provider) || !["desktopPath", "cliPath", "dataHome"].includes(key)) {
+    return { ok: false, error: "无效的设置项" };
+  }
+  const settings = await loadMonitorSettings();
+  const configured = settings.providers[provider][key];
+  const selectingMacApp = process.platform === "darwin" && key === "desktopPath";
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: key === "dataHome"
+      ? "选择本地数据目录"
+      : selectingMacApp ? "选择 .app 应用或可执行文件" : "选择可执行文件",
+    defaultPath: configured || undefined,
+    properties: key === "dataHome" ? ["openDirectory"] : ["openFile"],
+    message: selectingMacApp ? "请选择 Codex、ChatGPT 或 Claude 的 .app 应用" : undefined,
+    filters: key === "dataHome" || process.platform !== "win32"
+      ? undefined
+      : [{ name: "可执行文件", extensions: ["exe", "cmd", "bat"] }, { name: "所有文件", extensions: ["*"] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+  return { ok: true, path: result.filePaths[0] };
+});
 ipcMain.handle("monitor:get-mini-state", () => ({
   visible: Boolean(miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible()),
 }));
@@ -977,7 +1228,7 @@ ipcMain.handle("monitor:open-session", async (_event, providerId, sessionId) => 
   const session = provider?.sessions?.find((item) => item.id === sessionId);
   if (!provider || !session) return { ok: false, error: "本地会话已不存在" };
 
-  if (providerId === "codex" && provider.desktopPath) {
+  if (providerId === "codex" && (provider.desktopPath || provider.desktopAppId)) {
     const deepLink = `codex://threads/${encodeURIComponent(session.id)}`;
     try {
       await shell.openExternal(deepLink);
@@ -987,14 +1238,14 @@ ipcMain.handle("monitor:open-session", async (_event, providerId, sessionId) => 
     }
   }
 
-  if (providerId === "claude" && provider.desktopPath) {
+  if (providerId === "claude" && (provider.desktopPath || provider.desktopAppId)) {
     // Claude Desktop cannot externally focus a native local Code session. Its
     // resume URL imports the CLI transcript as a second "General coding
     // session", so only activate the app when the native mapping is present.
     const originatedInDesktop = session.desktopSessionId
       || String(session.source || "").startsWith("claude-desktop");
     if (originatedInDesktop) {
-      const error = await shell.openPath(provider.desktopPath);
+      const error = await activateDesktopApp(provider);
       return error
         ? { ok: false, error }
         : { ok: true, method: "desktop-activate", exact: false };
@@ -1004,7 +1255,7 @@ ipcMain.handle("monitor:open-session", async (_event, providerId, sessionId) => 
       await shell.openExternal(`claude://resume?session=${encodeURIComponent(session.id)}`);
       return { ok: true, method: "desktop", exact: true };
     } catch {
-      const error = await shell.openPath(provider.desktopPath);
+      const error = await activateDesktopApp(provider);
       if (!error) return { ok: true, method: "desktop-activate", exact: false };
     }
   }

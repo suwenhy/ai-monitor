@@ -2,6 +2,10 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("aiMonitor", {
   getSnapshot: () => ipcRenderer.invoke("monitor:get-snapshot"),
+  getSettings: () => ipcRenderer.invoke("monitor:get-settings"),
+  saveSettings: (settings) => ipcRenderer.invoke("monitor:save-settings", settings),
+  resetSettings: () => ipcRenderer.invoke("monitor:reset-settings"),
+  pickSettingsPath: (provider, key) => ipcRenderer.invoke("monitor:pick-settings-path", provider, key),
   openPath: (targetPath) => ipcRenderer.invoke("monitor:open-path", targetPath),
   openSession: (providerId, sessionId) => ipcRenderer.invoke("monitor:open-session", providerId, sessionId),
   getRuntime: () => ipcRenderer.invoke("monitor:get-runtime"),

@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   Activity,
+  ArrowLeft,
   AppWindow,
   BadgeDollarSign,
   Braces,
@@ -22,7 +23,10 @@ import {
   PictureInPicture2,
   Radio,
   RefreshCw,
+  RotateCcw,
+  Save,
   ScanLine,
+  Settings as SettingsIcon,
   ShieldCheck,
   Sun,
   TerminalSquare,
@@ -51,6 +55,17 @@ const overviewVisible = ref(localStorage.getItem("ai-monitor-overview") !== "hid
 const miniVisible = ref(false);
 const openingSessionId = ref(null);
 const sessionNotice = ref(null);
+const currentView = ref("monitor");
+const pathSettings = ref({
+  schemaVersion: 1,
+  providers: {
+    codex: { desktopPath: "", cliPath: "", dataHome: "" },
+    claude: { desktopPath: "", cliPath: "", dataHome: "" },
+  },
+});
+const settingsErrors = ref({});
+const settingsLoading = ref(false);
+const settingsSaving = ref(false);
 const theme = ref(
   localStorage.getItem("ai-monitor-theme")
     || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
@@ -77,6 +92,16 @@ const statusLabels = {
   failed: "异常",
   unknown: "未知",
 };
+
+const settingsProviders = [
+  { id: "codex", label: "Codex", icon: codexPixel },
+  { id: "claude", label: "Claude", icon: claudePixel },
+];
+const settingsFields = [
+  { key: "desktopPath", label: "Desktop 客户端", description: "选择桌面应用的可执行文件", icon: AppWindow },
+  { key: "cliPath", label: "CLI", description: "选择 codex / claude 命令文件", icon: TerminalSquare },
+  { key: "dataHome", label: "数据目录", description: "包含 sessions 或 projects 的本地目录", icon: Database },
+];
 
 const providers = computed(() => snapshot.value ? [snapshot.value.codex, snapshot.value.claude] : []);
 const onlineCount = computed(() => providers.value.filter((provider) => provider.running).length);
@@ -168,10 +193,97 @@ function showNotice(text, type = "info") {
 
 function installationItems(provider) {
   return [
-    { label: "Desktop", path: provider.desktopPath, icon: AppWindow },
-    { label: "CLI", path: provider.cliPath, icon: TerminalSquare },
-    { label: "数据目录", path: provider.dataHome, icon: Database },
+    { label: "Desktop", path: provider.desktopPath, overridden: provider.pathOverrides?.desktop, icon: AppWindow },
+    { label: "CLI", path: provider.cliPath, overridden: provider.pathOverrides?.cli, icon: TerminalSquare },
+    { label: "数据目录", path: provider.dataHome, overridden: provider.pathOverrides?.data, icon: Database },
   ];
+}
+
+function detectedSettingPath(providerId, key) {
+  return snapshot.value?.[providerId]?.detectedPaths?.[key]
+    || snapshot.value?.[providerId]?.[key]
+    || "";
+}
+
+function settingError(providerId, key) {
+  return settingsErrors.value[`${providerId}.${key}`] || "";
+}
+
+function settingFieldDescription(field) {
+  if (field.key === "desktopPath" && snapshot.value?.platform === "darwin") {
+    return "选择 .app 应用包或应用内部的可执行文件";
+  }
+  return field.description;
+}
+
+function useDetectedPath(providerId, key) {
+  const detected = detectedSettingPath(providerId, key);
+  if (detected) pathSettings.value.providers[providerId][key] = detected;
+}
+
+async function openSettings() {
+  currentView.value = "settings";
+  settingsErrors.value = {};
+  if (!window.aiMonitor) return;
+  settingsLoading.value = true;
+  try {
+    pathSettings.value = await window.aiMonitor.getSettings();
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : "无法读取设置", "error");
+  } finally {
+    settingsLoading.value = false;
+  }
+}
+
+async function pickSettingPath(providerId, key) {
+  if (!window.aiMonitor) {
+    showNotice("界面预览无法打开系统选择器");
+    return;
+  }
+  const result = await window.aiMonitor.pickSettingsPath(providerId, key);
+  if (result?.ok) {
+    pathSettings.value.providers[providerId][key] = result.path;
+    delete settingsErrors.value[`${providerId}.${key}`];
+  } else if (!result?.canceled) {
+    showNotice(result?.error || "无法选择路径", "error");
+  }
+}
+
+async function savePathSettings() {
+  if (!window.aiMonitor || settingsSaving.value) return;
+  settingsSaving.value = true;
+  settingsErrors.value = {};
+  try {
+    const result = await window.aiMonitor.saveSettings(pathSettings.value);
+    if (!result?.ok) {
+      settingsErrors.value = result?.errors || {};
+      showNotice(result?.error || "请检查标记的路径", "error");
+      return;
+    }
+    pathSettings.value = result.settings;
+    showNotice("设置已保存并应用", "success");
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : "无法保存设置", "error");
+  } finally {
+    settingsSaving.value = false;
+  }
+}
+
+async function resetPathSettings() {
+  if (!window.aiMonitor || settingsSaving.value) return;
+  settingsSaving.value = true;
+  settingsErrors.value = {};
+  try {
+    const result = await window.aiMonitor.resetSettings();
+    if (!result?.ok) {
+      showNotice(result?.error || "无法恢复自动检测", "error");
+      return;
+    }
+    pathSettings.value = result.settings;
+    showNotice("已恢复全部自动检测", "success");
+  } finally {
+    settingsSaving.value = false;
+  }
 }
 
 function providerMetrics(provider) {
@@ -391,6 +503,16 @@ onUnmounted(() => {
           <Eye v-else />
         </button>
         <button
+          class="icon-button settings-button"
+          :class="{ active: currentView === 'settings' }"
+          :aria-label="currentView === 'settings' ? '返回监控' : '打开设置'"
+          :title="currentView === 'settings' ? '返回监控' : '路径设置'"
+          @click="currentView === 'settings' ? currentView = 'monitor' : openSettings()"
+        >
+          <ArrowLeft v-if="currentView === 'settings'" />
+          <SettingsIcon v-else />
+        </button>
+        <button
           class="icon-button theme-button"
           :aria-label="theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'"
           :title="theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'"
@@ -411,7 +533,7 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <main>
+    <main v-if="currentView === 'monitor'">
       <Transition name="overview-fold">
         <section v-if="overviewVisible" class="overview" aria-label="全局概览">
           <div class="overview-copy">
@@ -489,7 +611,7 @@ onUnmounted(() => {
           <div class="install-block" aria-label="安装位置">
             <div v-for="item in installationItems(provider)" :key="item.label" class="install-row">
               <span class="install-icon"><component :is="item.icon" /></span>
-              <span class="install-name">{{ item.label }}</span>
+              <span class="install-name">{{ item.label }}<small v-if="item.overridden">手动</small></span>
               <span class="install-path" :class="{ muted: !item.path }" :title="item.path || ''">{{ shortPath(item.path) }}</span>
               <button
                 v-if="item.path"
@@ -501,6 +623,9 @@ onUnmounted(() => {
                 <FolderOpen />
               </button>
               <span v-else class="missing-mark">--</span>
+            </div>
+            <div v-if="provider.errors?.length" class="provider-path-error">
+              <TriangleAlert />{{ provider.errors.join("；") }}
             </div>
           </div>
 
@@ -567,6 +692,96 @@ onUnmounted(() => {
           </div>
         </section>
       </div>
+    </main>
+
+    <main v-else class="settings-main">
+      <section class="settings-hero">
+        <div>
+          <span class="eyebrow">LOCAL FALLBACK</span>
+          <h2>路径设置</h2>
+          <p>手动路径优先于自动检测。留空时继续使用系统探测、环境变量和默认目录。</p>
+        </div>
+        <button class="secondary-action" type="button" @click="currentView = 'monitor'">
+          <ArrowLeft />返回监控
+        </button>
+      </section>
+
+      <div v-if="settingsLoading" class="settings-loading">
+        <ScanLine />正在读取本地设置
+      </div>
+
+      <div v-else class="settings-grid">
+        <section
+          v-for="provider in settingsProviders"
+          :key="provider.id"
+          class="settings-provider"
+          :class="`settings-provider-${provider.id}`"
+        >
+          <header class="settings-provider-header">
+            <span class="settings-provider-icon"><img :src="provider.icon" alt="" /></span>
+            <div>
+              <h3>{{ provider.label }}</h3>
+              <p>可选手动覆盖 · 留空保持自动检测</p>
+            </div>
+          </header>
+
+          <div class="settings-fields">
+            <div v-for="field in settingsFields" :key="field.key" class="settings-field">
+              <div class="settings-field-heading">
+                <span><component :is="field.icon" />{{ field.label }}</span>
+                <button
+                  v-if="detectedSettingPath(provider.id, field.key)"
+                  class="text-action"
+                  type="button"
+                  @click="useDetectedPath(provider.id, field.key)"
+                >
+                  使用检测值
+                </button>
+              </div>
+              <p>{{ settingFieldDescription(field) }}</p>
+              <div class="settings-input-row" :class="{ invalid: settingError(provider.id, field.key) }">
+                <input
+                  v-model="pathSettings.providers[provider.id][field.key]"
+                  type="text"
+                  spellcheck="false"
+                  :aria-label="`${provider.label} ${field.label}`"
+                  :placeholder="detectedSettingPath(provider.id, field.key) || '留空以自动检测'"
+                  :aria-invalid="Boolean(settingError(provider.id, field.key))"
+                />
+                <button
+                  class="browse-button"
+                  type="button"
+                  :aria-label="`选择 ${provider.label} ${field.label}`"
+                  @click="pickSettingPath(provider.id, field.key)"
+                >
+                  <FolderOpen />选择
+                </button>
+              </div>
+              <span v-if="settingError(provider.id, field.key)" class="settings-error">
+                <TriangleAlert />{{ settingError(provider.id, field.key) }}
+              </span>
+              <span v-else class="detected-path" :title="detectedSettingPath(provider.id, field.key)">
+                自动：{{ detectedSettingPath(provider.id, field.key) || "未检测到" }}
+              </span>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section class="settings-actions">
+        <div>
+          <strong>手动覆盖仅保存在本机</strong>
+          <span>保存后会立即重新扫描，无需重启应用。</span>
+        </div>
+        <div class="settings-action-buttons">
+          <button class="secondary-action" type="button" :disabled="settingsSaving" @click="resetPathSettings">
+            <RotateCcw />全部恢复自动
+          </button>
+          <button class="primary-action" type="button" :disabled="settingsSaving" @click="savePathSettings">
+            <Save />{{ settingsSaving ? "保存中" : "保存并应用" }}
+          </button>
+        </div>
+      </section>
     </main>
 
     <footer>
