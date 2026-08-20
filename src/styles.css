@@ -6,12 +6,20 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Fusion Pixel";
+  src: url("./assets/fonts/fusion-pixel-12px-monospaced-zh_hans.otf.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700 900;
+  font-display: swap;
+}
+
 :root {
   color-scheme: light;
   font-family: "Fusion Pixel", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
   color: #172027;
   background: #dce4e5;
-  font-synthesis: weight;
+  font-synthesis: none;
   text-rendering: optimizeLegibility;
   --bg: #dce4e5;
   --grid: rgba(45, 63, 68, 0.08);

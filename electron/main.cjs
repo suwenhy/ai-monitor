@@ -9,6 +9,19 @@ const execFileAsync = promisify(execFile);
 const REFRESH_INTERVAL_MS = 3_000;
 const MAX_SESSION_FILES = 14;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
+const CLAUDE_RECENT_ACTIVITY_MS = 15_000;
+const CLAUDE_USAGE_STALE_MS = 30 * 60_000;
+const CLAUDE_USAGE_KEYS = {
+  fh: "fiveHour",
+  sd: "sevenDay",
+  so: "sevenDayOpus",
+  oa: "sevenDayOauthApps",
+  cw: "sevenDayCowork",
+  om: "sevenDayOmelette",
+  op: "omelettePromotional",
+  sn: "sevenDaySonnet",
+  xu: "extraUsage",
+};
 
 let mainWindow = null;
 let miniWindow = null;
@@ -118,6 +131,7 @@ function platformCandidates() {
       codexCli: ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", homePath(".local", "bin", "codex")],
       claudeDesktop: ["/Applications/Claude.app", homePath("Applications", "Claude.app")],
       claudeCli: ["/opt/homebrew/bin/claude", "/usr/local/bin/claude", homePath(".local", "bin", "claude")],
+      claudeDesktopData: [homePath("Library", "Application Support", "Claude")],
     };
   }
 
@@ -137,6 +151,7 @@ function platformCandidates() {
         path.join(localAppData, "AnthropicClaude", "Claude.exe"),
       ],
       claudeCli: [path.join(appData, "npm", "claude.cmd"), homePath(".local", "bin", "claude.exe")],
+      claudeDesktopData: [path.join(appData, "Claude"), path.join(localAppData, "Claude")],
     };
   }
 
@@ -145,6 +160,7 @@ function platformCandidates() {
     codexCli: ["/usr/local/bin/codex", homePath(".local", "bin", "codex")],
     claudeDesktop: [],
     claudeCli: ["/usr/local/bin/claude", homePath(".local", "bin", "claude")],
+    claudeDesktopData: [homePath(".config", "Claude"), homePath(".config", "claude")],
   };
 }
 
@@ -187,6 +203,19 @@ function matchingProcesses(processes, provider) {
       ];
   return processes
     .filter((item) => patterns.some((pattern) => pattern.test(item.command)))
+    .map((item) => ({ ...item, command: item.command.slice(0, 240) }))
+    .slice(0, 12);
+}
+
+function matchingClaudeCodeProcesses(processes) {
+  return processes
+    .filter((item) => {
+      const command = String(item.command || "");
+      if (command.startsWith("/Applications/Claude.app/")) return false;
+      if (/^\/.*\/claude\.app\/Contents\/MacOS\/claude(?:\s|$)/.test(command)) return true;
+      const executable = command.match(/^"([^"]+)"|^(\S+)/)?.slice(1).find(Boolean) || "";
+      return /^claude(?:\.exe|\.cmd)?$/i.test(executable.split(/[\\/]/).at(-1));
+    })
     .map((item) => ({ ...item, command: item.command.slice(0, 240) }))
     .slice(0, 12);
 }
@@ -389,11 +418,6 @@ function hasPendingClaudeQuestion(lines) {
 function claudeTurnIsActive(lines) {
   let active = false;
   for (const line of lines) {
-    if (line.type === "queue-operation") {
-      if (["enqueue", "dequeue"].includes(line.operation)) active = true;
-      continue;
-    }
-
     if (line.type === "user") {
       active = true;
       continue;
@@ -405,7 +429,7 @@ function claudeTurnIsActive(lines) {
       continue;
     }
 
-    if (line.type === "system" && line.subtype === "turn_duration") active = false;
+    if (line.type === "system" && ["turn_duration", "stop_hook_summary"].includes(line.subtype)) active = false;
   }
   return active;
 }
@@ -418,7 +442,7 @@ function agentIsWaiting(agent) {
   return /waiting|needs?.?input|approval|permission|blocked/i.test(state);
 }
 
-function parseClaudeSession(fileInfo, lines, activeAgents) {
+function parseClaudeSession(fileInfo, lines, activeAgents, claudeCodeRunning) {
   const meaningful = lines.filter((line) => !line.isSidechain);
   const firstUser = meaningful.find((line) => line.type === "user" && !line.sourceToolAssistantUUID);
   const title = latestValue(meaningful, (line) => line.type === "ai-title" ? line.aiTitle : undefined);
@@ -441,9 +465,17 @@ function parseClaudeSession(fileInfo, lines, activeAgents) {
   }, { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0 });
   const latestUsage = latestAssistant?.message?.usage || {};
   const agent = activeAgents.get(id);
-  const active = Boolean(agent);
-  const waitingForConfirmation = active && (agentIsWaiting(agent) || hasPendingClaudeQuestion(meaningful));
-  const turnIsActive = active && claudeTurnIsActive(meaningful);
+  const latestActivityAt = latestValue(meaningful, (line) => {
+    if (!["user", "assistant", "queue-operation"].includes(line.type) || !line.timestamp) return undefined;
+    const timestamp = Date.parse(line.timestamp);
+    return Number.isFinite(timestamp) ? timestamp : undefined;
+  });
+  const activityAge = latestActivityAt === null ? Infinity : Math.max(0, Date.now() - latestActivityAt);
+  const pendingQuestion = hasPendingClaudeQuestion(meaningful);
+  const transcriptTurnActive = claudeTurnIsActive(meaningful);
+  const recentlyActive = activityAge < CLAUDE_RECENT_ACTIVITY_MS;
+  const active = transcriptTurnActive && (Boolean(agent) || claudeCodeRunning || recentlyActive);
+  const waitingForConfirmation = active && (agentIsWaiting(agent) || pendingQuestion);
 
   return {
     id,
@@ -452,7 +484,7 @@ function parseClaudeSession(fileInfo, lines, activeAgents) {
     cwd: cwd || null,
     model: latestAssistant?.message?.model || null,
     effort: latestAssistant?.effort || null,
-    status: waitingForConfirmation ? "waiting" : turnIsActive ? "running" : "idle",
+    status: waitingForConfirmation ? "waiting" : active ? "running" : "idle",
     source: firstUser?.entrypoint || "Claude Code",
     permissionMode: mode || null,
     updatedAt: new Date(fileInfo.mtimeMs).toISOString(),
@@ -504,6 +536,48 @@ async function readClaudeStats(claudeHome) {
   }
 }
 
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(0, Math.min(100, number));
+}
+
+async function readClaudePlanUsage(dataDirectories = []) {
+  const usagePath = await firstExisting(dataDirectories.map((directory) => path.join(directory, "plan-usage-history.json")));
+  if (!usagePath) return null;
+
+  try {
+    const data = JSON.parse(await fs.readFile(usagePath, "utf8"));
+    const sample = Array.isArray(data.samples)
+      ? data.samples
+        .filter((item) => Number.isFinite(Number(item?.t)) && item?.u && typeof item.u === "object")
+        .sort((left, right) => Number(left.t) - Number(right.t))
+        .at(-1)
+      : null;
+    if (!sample) return null;
+
+    const windows = {};
+    for (const [shortName, longName] of Object.entries(CLAUDE_USAGE_KEYS)) {
+      const usedPercent = clampPercent(sample.u[shortName]);
+      if (usedPercent === null) continue;
+      windows[longName] = {
+        usedPercent,
+        remainingPercent: Math.max(0, 100 - usedPercent),
+      };
+    }
+
+    const sampledAt = Number(sample.t);
+    return {
+      windows,
+      sampledAt: new Date(sampledAt).toISOString(),
+      stale: Date.now() - sampledAt > CLAUDE_USAGE_STALE_MS,
+      path: usagePath,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function collectCodex(processes, candidates) {
   const codexHome = process.env.CODEX_HOME || homePath(".codex");
   const [desktopPath, cliPath, files] = await Promise.all([
@@ -540,19 +614,23 @@ async function collectCodex(processes, candidates) {
 
 async function collectClaude(processes, candidates) {
   const claudeHome = process.env.CLAUDE_CONFIG_DIR || homePath(".claude");
-  const [desktopPath, cliPath, files, stats] = await Promise.all([
+  const [desktopPath, cliPath, files, stats, planUsage] = await Promise.all([
     firstExisting(candidates.claudeDesktop),
     findExecutable("claude", candidates.claudeCli),
     collectFiles(path.join(claudeHome, "projects"), ".jsonl"),
     readClaudeStats(claudeHome),
+    readClaudePlanUsage(candidates.claudeDesktopData),
   ]);
   const agents = await readClaudeAgents(cliPath);
   const activeAgents = new Map(agents
     .map((agent) => [agent.sessionId || agent.session_id || agent.id, agent])
     .filter(([id]) => Boolean(id)));
   const runningProcesses = matchingProcesses(processes, "claude");
+  const codeProcesses = matchingClaudeCodeProcesses(processes);
   const mainSessionFiles = files.filter((file) => !file.path.includes(`${path.sep}subagents${path.sep}`));
-  const sessions = await Promise.all(mainSessionFiles.map(async (file) => parseClaudeSession(file, await readJsonLines(file), activeAgents)));
+  const sessions = await Promise.all(mainSessionFiles.map(async (file) => (
+    parseClaudeSession(file, await readJsonLines(file), activeAgents, codeProcesses.length > 0)
+  )));
   const sessionTotals = sessions.reduce((sum, session) => {
     sum.inputTokens += session.usage.inputTokens;
     sum.outputTokens += session.usage.outputTokens;
@@ -571,10 +649,12 @@ async function collectClaude(processes, candidates) {
     cliPath,
     dataHome: (await exists(claudeHome)) ? claudeHome : null,
     processes: runningProcesses,
+    codeProcesses,
     sessions,
     agents,
     totals: { ...sessionTotals, totalCostUsd },
     stats,
+    planUsage,
     errors: [],
   };
 }
@@ -774,6 +854,17 @@ function createMiniWindow() {
   return miniWindow;
 }
 
+async function setMacDockIcon() {
+  if (process.platform !== "darwin" || !app.dock || app.isPackaged) return;
+  const iconPath = path.join(__dirname, "..", "build", "app-icon.png");
+  if (!(await exists(iconPath))) return;
+  try {
+    app.dock.setIcon(iconPath);
+  } catch (error) {
+    console.warn(`Unable to set development Dock icon: ${normalizeError(error)}`);
+  }
+}
+
 ipcMain.handle("monitor:get-snapshot", () => refreshSnapshot());
 ipcMain.handle("monitor:get-runtime", () => ({ platform: process.platform, packaged: app.isPackaged }));
 ipcMain.handle("monitor:get-mini-state", () => ({
@@ -826,6 +917,7 @@ ipcMain.handle("monitor:open-session", async (_event, providerId, sessionId) => 
 });
 
 app.whenReady().then(async () => {
+  await setMacDockIcon();
   if (process.argv.includes("--snapshot-json")) {
     const snapshot = await buildSnapshot();
     process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);

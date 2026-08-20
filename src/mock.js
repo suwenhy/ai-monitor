@@ -83,6 +83,15 @@ export const mockSnapshot = {
       path: "/Users/local/.claude/stats-cache.json",
     },
     agents: [{ sessionId: "claude-1" }],
+    planUsage: {
+      sampledAt: new Date(now - 2 * 60_000).toISOString(),
+      stale: false,
+      path: "/Users/local/Library/Application Support/Claude/plan-usage-history.json",
+      windows: {
+        fiveHour: { usedPercent: 18, remainingPercent: 82 },
+        sevenDay: { usedPercent: 31, remainingPercent: 69 },
+      },
+    },
     errors: [],
     sessions: [
       {

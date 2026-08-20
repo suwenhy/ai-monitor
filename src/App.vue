@@ -210,6 +210,25 @@ function numberFrom(value, ...keys) {
 }
 
 function providerAllowance(provider) {
+  if (provider.id === "claude" && provider.planUsage) {
+    const fiveHourRemaining = numberFrom(provider.planUsage.windows?.fiveHour, "remainingPercent");
+    const sevenDayRemaining = numberFrom(provider.planUsage.windows?.sevenDay, "remainingPercent");
+    const primaryRemaining = sevenDayRemaining ?? fiveHourRemaining;
+    const sampledAt = provider.planUsage.sampledAt
+      ? relativeTime(provider.planUsage.sampledAt)
+      : null;
+    return {
+      label: "套餐剩余",
+      value: primaryRemaining === null ? "--" : `${Math.round(primaryRemaining)}%`,
+      helper: sevenDayRemaining === null ? "7 天用量未提供" : "7 天全部模型",
+      account: fiveHourRemaining === null
+        ? (sampledAt ? `${sampledAt}采样` : "5 小时用量未提供")
+        : `5 小时剩余 ${Math.round(fiveHourRemaining)}%${provider.planUsage.stale ? " · 历史样本" : ""}`,
+      icon: Gauge,
+      progress: primaryRemaining,
+    };
+  }
+
   const current = provider.sessions.find((session) => ["running", "waiting"].includes(session.status))
     || provider.sessions[0];
   const contextWindow = Number(current?.usage?.contextWindow) || 0;

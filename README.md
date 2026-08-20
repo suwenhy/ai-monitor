@@ -10,7 +10,8 @@ Electron + Vue 3 desktop monitor for local Codex and Claude activity. The app is
 - Related-process detection
 - Recent local sessions, current model, status, working directory, and token totals
 - Click-through to matching Codex or Claude Code sessions when supported by the desktop client
-- Claude Code background-agent detection through `claude agents --json`
+- Claude Code activity detection through CLI agents, processes, transcript events, and recent writes
+- Claude Desktop five-hour and seven-day plan usage from its read-only local usage history
 - Claude aggregate session/model/cost statistics from `stats-cache.json`
 - Three-second data refresh with independent one-second relative-time updates
 - All-session and active-session filters
@@ -22,9 +23,9 @@ Electron + Vue 3 desktop monitor for local Codex and Claude activity. The app is
 | Provider | Sources |
 | --- | --- |
 | Codex | `$CODEX_HOME` or `~/.codex`, `sessions/**/*.jsonl`, running processes |
-| Claude | `$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/**/*.jsonl`, `stats-cache.json`, `claude agents --json`, running processes |
+| Claude | `$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/**/*.jsonl`, `stats-cache.json`, Claude Desktop `plan-usage-history.json`, `claude agents --json`, running processes |
 
-Codex Desktop runtime state is process-local, so a session is marked active using persisted lifecycle events plus recent file activity. Claude Code background sessions use the CLI's JSON status when available.
+Codex Desktop runtime state is process-local, so a session is marked active using persisted lifecycle events plus recent file activity. Claude Code combines the CLI's JSON status with process and transcript activity because interactive sessions are not always returned by `claude agents --json`. Claude subscription limits are dynamic, so the monitor reports the same remaining percentages exposed by Claude Desktop rather than inventing a token count.
 
 ## Development
 
