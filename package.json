@@ -47,6 +47,7 @@
       "target": ["dmg", "zip"]
     },
     "win": {
+      "icon": "build/app-icon.png",
       "target": ["nsis", "portable"]
     },
     "linux": {
