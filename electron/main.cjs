@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile);
 const REFRESH_INTERVAL_MS = 3_000;
 const MAX_SESSION_FILES = 14;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
+const CODEX_APPROVAL_GRACE_MS = REFRESH_INTERVAL_MS * 2;
 const CLAUDE_RECENT_ACTIVITY_MS = 15_000;
 const CLAUDE_USAGE_STALE_MS = 30 * 60_000;
 const CLAUDE_USAGE_KEYS = {
@@ -353,27 +354,45 @@ function codexMessageText(line) {
   return "";
 }
 
-function hasPendingCodexConfirmation(lines) {
+function toolInputText(input) {
+  if (typeof input === "string") return input;
+  try {
+    return JSON.stringify(input ?? "");
+  } catch {
+    return String(input || "");
+  }
+}
+
+function hasPendingCodexConfirmation(lines, turnContext) {
   const responseItems = lines.filter((line) => line.type === "response_item");
   const answeredCalls = new Set(responseItems
     .filter((line) => ["function_call_output", "custom_tool_call_output"].includes(line.payload?.type))
     .map((line) => line.payload?.call_id)
     .filter(Boolean));
+  const approvalsAreAutomatic = turnContext?.approvals_reviewer === "auto_review"
+    || turnContext?.approval_policy === "never";
 
   return responseItems.some((line) => {
     const payload = line.payload || {};
     if (!payload.call_id || answeredCalls.has(payload.call_id)) return false;
     if (payload.type === "function_call" && payload.name === "request_user_input") return true;
-    if (payload.type !== "custom_tool_call") return false;
-    return payload.name === "exec"
-      && String(payload.input || "").includes("require_escalated")
-      && String(payload.input || "").includes("sandbox_permissions");
+    if (payload.type !== "custom_tool_call" || payload.name !== "exec") return false;
+
+    const input = toolInputText(payload.input);
+    const requestsApproval = input.includes("require_escalated")
+      && input.includes("sandbox_permissions");
+    if (!requestsApproval || approvalsAreAutomatic) return false;
+
+    const requestedAt = Date.parse(line.timestamp || "");
+    return Number.isFinite(requestedAt)
+      && Date.now() - requestedAt >= CODEX_APPROVAL_GRACE_MS;
   });
 }
 
 function parseCodexSession(fileInfo, lines, processRunning) {
   const metadata = lines.find((line) => line.type === "session_meta")?.payload || {};
   const contexts = lines.filter((line) => line.type === "turn_context");
+  const latestContext = contexts.at(-1)?.payload || {};
   const events = lines.filter((line) => line.type === "event_msg");
   const userMessage = events.find((line) => line.payload?.type === "user_message")?.payload?.message;
   const latestContent = latestValue(lines, (line) => codexMessageText(line) || undefined);
@@ -390,7 +409,7 @@ function parseCodexSession(fileInfo, lines, processRunning) {
   const sourceIsSubagent = metadata.thread_source === "subagent"
     || (metadata.source && typeof metadata.source === "object" && Boolean(metadata.source.subagent));
   const freshness = Date.now() - fileInfo.mtimeMs;
-  const waitingForConfirmation = hasPendingCodexConfirmation(lines);
+  const waitingForConfirmation = hasPendingCodexConfirmation(lines, latestContext);
   let status = "idle";
   if (lastTaskEvent?.type === "task_started" && processRunning) {
     status = waitingForConfirmation ? "waiting" : "running";
@@ -404,9 +423,9 @@ function parseCodexSession(fileInfo, lines, processRunning) {
     id: metadata.id || metadata.session_id || path.basename(fileInfo.path, ".jsonl"),
     title: shorten(userMessage, path.basename(metadata.cwd || fileInfo.path)),
     latestContent: shorten(latestContent, userMessage || path.basename(metadata.cwd || fileInfo.path)),
-    cwd: metadata.cwd || contexts.at(-1)?.payload?.cwd || null,
-    model: contexts.at(-1)?.payload?.model || metadata.model || null,
-    effort: contexts.at(-1)?.payload?.effort || null,
+    cwd: metadata.cwd || latestContext.cwd || null,
+    model: latestContext.model || metadata.model || null,
+    effort: latestContext.effort || null,
     status,
     source: metadata.originator || metadata.source || "Codex",
     updatedAt: new Date(fileInfo.mtimeMs).toISOString(),
@@ -852,7 +871,9 @@ function createMiniWindow() {
     y: workArea.y + 24,
     frame: false,
     alwaysOnTop: true,
-    skipTaskbar: true,
+    // On macOS the Dock icon is app-wide. Marking this helper window as
+    // skipTaskbar can hide the whole app from the Dock.
+    skipTaskbar: process.platform !== "darwin",
     resizable: true,
     maximizable: false,
     fullscreenable: false,
@@ -877,7 +898,10 @@ function createMiniWindow() {
     miniWindow.loadURL("http://127.0.0.1:5173/?view=mini");
   }
 
-  miniWindow.on("show", notifyMiniVisibility);
+  miniWindow.on("show", () => {
+    ensureMacDockVisible();
+    notifyMiniVisibility();
+  });
   miniWindow.on("hide", notifyMiniVisibility);
   miniWindow.on("close", (event) => {
     if (appIsQuitting) return;
@@ -895,8 +919,19 @@ function createMiniWindow() {
   return miniWindow;
 }
 
+async function ensureMacDockVisible() {
+  if (process.platform !== "darwin" || !app.dock || app.dock.isVisible()) return;
+  try {
+    await app.dock.show();
+  } catch (error) {
+    console.warn(`Unable to show Dock icon: ${normalizeError(error)}`);
+  }
+}
+
 async function setMacDockIcon() {
-  if (process.platform !== "darwin" || !app.dock || app.isPackaged) return;
+  if (process.platform !== "darwin" || !app.dock) return;
+  await ensureMacDockVisible();
+  if (app.isPackaged) return;
   const iconPath = path.join(__dirname, "..", "build", "app-icon.png");
   if (!(await exists(iconPath))) return;
   try {

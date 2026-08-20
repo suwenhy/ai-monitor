@@ -1,6 +1,6 @@
 {
   "name": "ai-monitor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "author": "marin",
   "description": "Local Codex and Claude Desktop activity monitor",
