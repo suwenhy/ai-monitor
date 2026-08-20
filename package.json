@@ -1,0 +1,59 @@
+{
+  "name": "ai-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "author": "marin",
+  "description": "Local Codex and Claude Desktop activity monitor",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && electron .\"",
+    "dev:web": "vite --host 127.0.0.1",
+    "start": "electron .",
+    "snapshot": "electron . --snapshot-json",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.33.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.0.12",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.1.0",
+    "wait-on": "^8.0.2"
+  },
+  "build": {
+    "appId": "com.marin.aimonitor",
+    "productName": "AI Monitor",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg", "zip"]
+    },
+    "win": {
+      "target": ["nsis", "portable"]
+    },
+    "nsis": {
+      "artifactName": "${productName} Setup ${version}-${arch}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "${productName} ${version}-${arch}.${ext}"
+    }
+  }
+}
