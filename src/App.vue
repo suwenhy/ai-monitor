@@ -286,7 +286,14 @@ async function openSession(provider, session) {
   try {
     const result = await window.aiMonitor.openSession(provider.id, session.id);
     if (result?.ok) {
-      showNotice(`已在 ${provider.label} 打开会话`, "success");
+      if (result.method === "desktop-activate" && result.exact === false) {
+        showNotice("已打开 Claude Desktop；当前版本暂不支持从外部定位原生 Code 会话");
+      } else {
+        const destination = result.method === "cli"
+          ? `${provider.id === "claude" ? "Claude" : "Codex"} CLI`
+          : provider.label;
+        showNotice(`已在 ${destination} 打开会话`, "success");
+      }
     } else {
       showNotice(result?.error || "无法打开该会话", "error");
     }

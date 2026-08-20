@@ -220,7 +220,7 @@ function matchingClaudeCodeProcesses(processes) {
     .slice(0, 12);
 }
 
-async function collectFiles(root, extension) {
+async function collectFiles(root, extension, limit = MAX_SESSION_FILES) {
   if (!(await exists(root))) return [];
   const results = [];
   const pending = [root];
@@ -248,7 +248,7 @@ async function collectFiles(root, extension) {
     }
   }
 
-  return results.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, MAX_SESSION_FILES);
+  return results.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit);
 }
 
 async function readJsonLines(fileInfo) {
@@ -282,6 +282,35 @@ function safeJson(text) {
   } catch {
     return null;
   }
+}
+
+async function readClaudeDesktopSessionIndex(dataRoots) {
+  const dataRoot = await firstExisting(dataRoots);
+  if (!dataRoot) return new Map();
+
+  const files = await collectFiles(path.join(dataRoot, "claude-code-sessions"), ".json", 500);
+  const index = new Map();
+  await Promise.all(files.map(async (file) => {
+    let record;
+    try {
+      record = safeJson(await fs.readFile(file.path, "utf8"));
+    } catch {
+      return;
+    }
+
+    const cliSessionId = record?.cliSessionId;
+    const desktopSessionId = record?.sessionId;
+    if (!isSessionId(cliSessionId) || typeof desktopSessionId !== "string") return;
+
+    const current = index.get(cliSessionId) || {};
+    if (desktopSessionId === `local_${cliSessionId}`) {
+      current.importedSessionId ||= desktopSessionId;
+    } else {
+      current.nativeSessionId ||= desktopSessionId;
+    }
+    index.set(cliSessionId, current);
+  }));
+  return index;
 }
 
 function shorten(text, fallback = "未命名会话") {
@@ -358,6 +387,8 @@ function parseCodexSession(fileInfo, lines, processRunning) {
   const usage = tokenEvent?.info?.total_token_usage || {};
   const contextUsage = tokenEvent?.info?.last_token_usage || {};
   const rateLimits = tokenEvent?.rate_limits || null;
+  const sourceIsSubagent = metadata.thread_source === "subagent"
+    || (metadata.source && typeof metadata.source === "object" && Boolean(metadata.source.subagent));
   const freshness = Date.now() - fileInfo.mtimeMs;
   const waitingForConfirmation = hasPendingCodexConfirmation(lines);
   let status = "idle";
@@ -389,8 +420,8 @@ function parseCodexSession(fileInfo, lines, processRunning) {
       contextWindow: tokenEvent?.info?.model_context_window || metadata.context_window || null,
     },
     rateLimits,
-    internal: typeof metadata.thread_source === "object"
-      && String(userMessage || "").startsWith("The following is the Codex agent history whose request action you are assessing."),
+    internal: sourceIsSubagent
+      || String(userMessage || "").startsWith("The following is the Codex agent history whose request action you are assessing."),
   };
 }
 
@@ -452,7 +483,10 @@ function parseClaudeSession(fileInfo, lines, activeAgents, claudeCodeRunning) {
     if (!["user", "assistant"].includes(line.type)) return undefined;
     return messageText(line.message) || undefined;
   });
-  const id = latestValue(meaningful, (line) => line.sessionId || line.session_id) || path.basename(fileInfo.path, ".jsonl");
+  const transcriptId = path.basename(fileInfo.path, ".jsonl");
+  const id = isSessionId(transcriptId)
+    ? transcriptId
+    : latestValue(meaningful, (line) => line.sessionId || line.session_id) || transcriptId;
   const cwd = latestValue(meaningful, (line) => line.cwd);
   const mode = latestValue(meaningful, (line) => line.type === "permission-mode" ? line.permissionMode : undefined);
   const totals = assistants.reduce((sum, line) => {
@@ -614,12 +648,13 @@ async function collectCodex(processes, candidates) {
 
 async function collectClaude(processes, candidates) {
   const claudeHome = process.env.CLAUDE_CONFIG_DIR || homePath(".claude");
-  const [desktopPath, cliPath, files, stats, planUsage] = await Promise.all([
+  const [desktopPath, cliPath, files, stats, planUsage, desktopSessionIndex] = await Promise.all([
     firstExisting(candidates.claudeDesktop),
     findExecutable("claude", candidates.claudeCli),
     collectFiles(path.join(claudeHome, "projects"), ".jsonl"),
     readClaudeStats(claudeHome),
     readClaudePlanUsage(candidates.claudeDesktopData),
+    readClaudeDesktopSessionIndex(candidates.claudeDesktopData),
   ]);
   const agents = await readClaudeAgents(cliPath);
   const activeAgents = new Map(agents
@@ -628,9 +663,15 @@ async function collectClaude(processes, candidates) {
   const runningProcesses = matchingProcesses(processes, "claude");
   const codeProcesses = matchingClaudeCodeProcesses(processes);
   const mainSessionFiles = files.filter((file) => !file.path.includes(`${path.sep}subagents${path.sep}`));
-  const sessions = await Promise.all(mainSessionFiles.map(async (file) => (
-    parseClaudeSession(file, await readJsonLines(file), activeAgents, codeProcesses.length > 0)
-  )));
+  const sessions = await Promise.all(mainSessionFiles.map(async (file) => {
+    const session = parseClaudeSession(file, await readJsonLines(file), activeAgents, codeProcesses.length > 0);
+    const desktopSession = desktopSessionIndex.get(session.id);
+    return {
+      ...session,
+      desktopSessionId: desktopSession?.nativeSessionId || null,
+      desktopImported: Boolean(desktopSession?.importedSessionId),
+    };
+  }));
   const sessionTotals = sessions.reduce((sum, session) => {
     sum.inputTokens += session.usage.inputTokens;
     sum.outputTokens += session.usage.outputTokens;
@@ -901,15 +942,35 @@ ipcMain.handle("monitor:open-session", async (_event, providerId, sessionId) => 
   const session = provider?.sessions?.find((item) => item.id === sessionId);
   if (!provider || !session) return { ok: false, error: "本地会话已不存在" };
 
-  if (provider.desktopPath) {
-    const deepLink = providerId === "codex"
-      ? `codex://threads/${encodeURIComponent(session.id)}`
-      : `claude://resume?session=${encodeURIComponent(session.id)}`;
+  if (providerId === "codex" && provider.desktopPath) {
+    const deepLink = `codex://threads/${encodeURIComponent(session.id)}`;
     try {
       await shell.openExternal(deepLink);
       return { ok: true, method: "desktop" };
     } catch {
       // Fall through to the documented CLI resume command.
+    }
+  }
+
+  if (providerId === "claude" && provider.desktopPath) {
+    // Claude Desktop cannot externally focus a native local Code session. Its
+    // resume URL imports the CLI transcript as a second "General coding
+    // session", so only activate the app when the native mapping is present.
+    const originatedInDesktop = session.desktopSessionId
+      || String(session.source || "").startsWith("claude-desktop");
+    if (originatedInDesktop) {
+      const error = await shell.openPath(provider.desktopPath);
+      return error
+        ? { ok: false, error }
+        : { ok: true, method: "desktop-activate", exact: false };
+    }
+
+    try {
+      await shell.openExternal(`claude://resume?session=${encodeURIComponent(session.id)}`);
+      return { ok: true, method: "desktop", exact: true };
+    } catch {
+      const error = await shell.openPath(provider.desktopPath);
+      if (!error) return { ok: true, method: "desktop-activate", exact: false };
     }
   }
 
