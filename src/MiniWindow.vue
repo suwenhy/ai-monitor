@@ -56,6 +56,13 @@ const displayedSessions = computed(() => {
   return [...recent, ...activeSessions.value];
 });
 
+const accountAllowances = computed(() => {
+  if (!snapshot.value) return [];
+  return [snapshot.value.codex, snapshot.value.claude]
+    .filter(Boolean)
+    .map((provider) => providerAllowance(provider));
+});
+
 const alertIcon = computed(() => {
   if (activeAlert.value?.type === "complete") return Check;
   if (activeAlert.value?.type === "waiting" || activeAlert.value?.type === "failed") return AlertTriangle;
@@ -71,6 +78,67 @@ function formatTokens(value) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}K`;
   return String(value);
+}
+
+function finiteNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function limitResetAt(limit) {
+  const raw = limit?.resetsAt ?? limit?.resets_at ?? limit?.resetAt ?? limit?.reset_at;
+  if (raw === undefined || raw === null || raw === "") return null;
+  if (typeof raw === "number" || /^\d+(\.\d+)?$/.test(String(raw))) {
+    const timestamp = Number(raw);
+    const date = new Date(timestamp < 1_000_000_000_000 ? timestamp * 1_000 : timestamp);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  }
+  const timestamp = Date.parse(raw);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function providerAllowance(provider) {
+  if (provider.id === "claude") {
+    const sevenDay = provider.planUsage?.windows?.sevenDay;
+    const fiveHour = provider.planUsage?.windows?.fiveHour;
+    const window = sevenDay || fiveHour;
+    const remaining = finiteNumber(window?.remainingPercent);
+    return {
+      id: provider.id,
+      label: "CLAUDE",
+      remaining,
+      detail: sevenDay ? "7 天额度" : fiveHour ? "5 小时额度" : "账号用量未提供",
+      resetAt: limitResetAt(window),
+      stale: Boolean(provider.planUsage?.stale),
+    };
+  }
+
+  const session = (provider.sessions || []).find((item) => item.rateLimits?.primary || item.rateLimits?.secondary);
+  const limit = session?.rateLimits?.primary || session?.rateLimits?.secondary;
+  const used = finiteNumber(limit?.usedPercent ?? limit?.used_percent);
+  const windowMinutes = finiteNumber(limit?.windowMinutes ?? limit?.window_minutes);
+  return {
+    id: provider.id,
+    label: "CODEX",
+    remaining: used === null ? null : Math.max(0, Math.min(100, 100 - used)),
+    detail: windowMinutes ? `${Math.round(windowMinutes / 60 / 24)} 天额度` : "账号用量未提供",
+    resetAt: limitResetAt(limit),
+    stale: false,
+  };
+}
+
+function formatResetTime(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 function relativeTime(iso) {
@@ -207,7 +275,6 @@ onUnmounted(() => {
   <div class="mini-page">
     <section class="mini-shell" :class="activeAlert ? `mini-alerting-${activeAlert.type}` : ''">
       <header class="mini-header">
-        <span class="mini-brand-mark" aria-hidden="true"><i></i></span>
         <div class="mini-heading">
           <strong>ACTIVE TASKS</strong>
           <span><i class="mini-live-dot"></i>{{ activeSessions.length }} 个进行中</span>
@@ -226,6 +293,29 @@ onUnmounted(() => {
           </div>
         </div>
       </Transition>
+
+      <section v-if="accountAllowances.length" class="mini-allowances" aria-label="账号剩余用量">
+        <article
+          v-for="allowance in accountAllowances"
+          :key="allowance.id"
+          class="mini-allowance"
+          :class="`mini-provider-${allowance.id}`"
+        >
+          <div class="mini-allowance-heading">
+            <span>{{ allowance.label }}</span>
+            <strong>{{ allowance.remaining === null ? "--" : `${Math.round(allowance.remaining)}%` }}</strong>
+          </div>
+          <div class="mini-allowance-track" aria-hidden="true">
+            <i :style="{ width: `${allowance.remaining ?? 0}%` }"></i>
+          </div>
+          <div class="mini-allowance-meta">
+            <span>{{ allowance.detail }}{{ allowance.stale ? " · 历史" : "" }}</span>
+            <time v-if="allowance.resetAt" :datetime="allowance.resetAt">
+              刷新 {{ formatResetTime(allowance.resetAt) }}
+            </time>
+          </div>
+        </article>
+      </section>
 
       <main class="mini-content">
         <div v-if="loading" class="mini-empty mini-loading">

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } = require("electron");
 const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -40,6 +40,7 @@ const CLAUDE_USAGE_KEYS = {
 
 let mainWindow = null;
 let miniWindow = null;
+let tray = null;
 let refreshTimer = null;
 let lastSnapshot = null;
 let refreshPromise = null;
@@ -774,6 +775,17 @@ function clampPercent(value) {
   return Math.max(0, Math.min(100, number));
 }
 
+function normalizeUsageResetAt(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const numeric = Number(value);
+  const timestamp = Number.isFinite(numeric)
+    ? (numeric < 1_000_000_000_000 ? numeric * 1_000 : numeric)
+    : Date.parse(value);
+  if (!Number.isFinite(timestamp)) return null;
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
 async function readClaudePlanUsage(dataDirectories = []) {
   const usagePath = await firstExisting(dataDirectories.map((directory) => path.join(directory, "plan-usage-history.json")));
   if (!usagePath) return null;
@@ -790,11 +802,23 @@ async function readClaudePlanUsage(dataDirectories = []) {
 
     const windows = {};
     for (const [shortName, longName] of Object.entries(CLAUDE_USAGE_KEYS)) {
-      const usedPercent = clampPercent(sample.u[shortName]);
+      const rawUsage = sample.u[shortName];
+      const usedPercent = clampPercent(typeof rawUsage === "object"
+        ? rawUsage?.usedPercent ?? rawUsage?.used_percent ?? rawUsage?.value
+        : rawUsage);
       if (usedPercent === null) continue;
+      const resetsAt = normalizeUsageResetAt(
+        rawUsage?.resetsAt
+          ?? rawUsage?.resets_at
+          ?? rawUsage?.resetAt
+          ?? rawUsage?.reset_at
+          ?? sample.r?.[shortName]
+          ?? sample.resets?.[shortName],
+      );
       windows[longName] = {
         usedPercent,
         remainingPercent: Math.max(0, 100 - usedPercent),
+        ...(resetsAt ? { resetsAt } : {}),
       };
     }
 
@@ -1017,11 +1041,64 @@ function sendSnapshot(window, snapshot) {
   if (window && !window.isDestroyed()) window.webContents.send("monitor:snapshot", snapshot);
 }
 
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function toggleMiniWindow() {
+  if (!miniWindow || miniWindow.isDestroyed()) {
+    createMiniWindow();
+    notifyMiniVisibility();
+    return { visible: true };
+  }
+  if (miniWindow.isVisible()) miniWindow.hide();
+  else miniWindow.showInactive();
+  notifyMiniVisibility();
+  return { visible: miniWindow.isVisible() };
+}
+
+function updateTrayMenu() {
+  if (!tray || tray.isDestroyed()) return;
+  const miniVisible = Boolean(miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible());
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "显示主界面", click: showMainWindow },
+    { label: miniVisible ? "隐藏悬浮窗" : "显示悬浮窗", click: toggleMiniWindow },
+    { type: "separator" },
+    {
+      label: "退出 AI Monitor",
+      click: () => {
+        appIsQuitting = true;
+        app.quit();
+      },
+    },
+  ]));
+}
+
+function createTray() {
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, "app-icon.png")
+    : path.join(__dirname, "..", "build", "app-icon.png");
+  let icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) icon = nativeImage.createFromPath(process.execPath);
+  if (icon.isEmpty()) return;
+  if (process.platform === "darwin") icon.setTemplateImage(true);
+  else icon = icon.resize({ width: 16, height: 16 });
+
+  tray = new Tray(icon);
+  tray.setToolTip("AI Monitor");
+  updateTrayMenu();
+  if (process.platform !== "darwin") tray.on("click", showMainWindow);
+}
+
 function notifyMiniVisibility() {
   const visible = Boolean(miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible());
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("monitor:mini-visibility", visible);
   }
+  updateTrayMenu();
 }
 
 async function refreshSnapshot() {
@@ -1054,7 +1131,7 @@ function createWindow() {
     height: 940,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: "#f4f6f8",
+    backgroundColor: "#e9edf4",
     title: "AI Monitor",
     trafficLightPosition: { x: 18, y: 18 },
     webPreferences: {
@@ -1071,13 +1148,18 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+  mainWindow.on("close", () => {
+    if (process.platform === "darwin" || appIsQuitting) return;
+    appIsQuitting = true;
+    if (miniWindow && !miniWindow.isDestroyed()) miniWindow.destroy();
+  });
 }
 
 function createMiniWindow() {
   const workArea = screen.getPrimaryDisplay().workArea;
   miniWindow = new BrowserWindow({
     width: 390,
-    height: 320,
+    height: 380,
     minWidth: 340,
     minHeight: 220,
     x: Math.max(workArea.x, workArea.x + workArea.width - 414),
@@ -1197,17 +1279,7 @@ ipcMain.handle("monitor:pick-settings-path", async (_event, provider, key) => {
 ipcMain.handle("monitor:get-mini-state", () => ({
   visible: Boolean(miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible()),
 }));
-ipcMain.handle("monitor:toggle-mini", () => {
-  if (!miniWindow || miniWindow.isDestroyed()) {
-    createMiniWindow().showInactive();
-    notifyMiniVisibility();
-    return { visible: true };
-  }
-  if (miniWindow.isVisible()) miniWindow.hide();
-  else miniWindow.showInactive();
-  notifyMiniVisibility();
-  return { visible: miniWindow.isVisible() };
-});
+ipcMain.handle("monitor:toggle-mini", toggleMiniWindow);
 ipcMain.handle("monitor:close-mini", () => {
   if (miniWindow && !miniWindow.isDestroyed()) miniWindow.hide();
   notifyMiniVisibility();
@@ -1273,6 +1345,7 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+  createTray();
   await refreshSnapshot();
   refreshTimer = setInterval(refreshSnapshot, REFRESH_INTERVAL_MS);
   app.on("activate", () => {
@@ -1288,4 +1361,6 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   appIsQuitting = true;
   if (refreshTimer) clearInterval(refreshTimer);
+  if (tray && !tray.isDestroyed()) tray.destroy();
+  tray = null;
 });

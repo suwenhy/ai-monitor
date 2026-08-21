@@ -18,22 +18,24 @@
   color-scheme: light;
   font-family: "Fusion Pixel", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
   color: #172027;
-  background: #dce4e5;
+  background: #e9edf4;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --bg: #dce4e5;
-  --grid: rgba(45, 63, 68, 0.08);
+  --bg: #e9edf4;
+  --bg-codex-glow: rgba(64, 95, 242, 0.14);
+  --bg-claude-glow: rgba(217, 154, 22, 0.11);
+  --bg-dot: rgba(38, 51, 67, 0.09);
   --ink: #172027;
   --muted: #5c696e;
   --quiet: #7d8a8f;
-  --surface: #f8faf7;
-  --surface-alt: #e9efed;
-  --surface-hover: #f0f5f2;
-  --topbar: #f5f7f2;
+  --surface: #fafbfe;
+  --surface-alt: #eef2f7;
+  --surface-hover: #f3f6fb;
+  --topbar: #f7f8fb;
   --line: #172027;
-  --line-soft: #aebbc0;
-  --shadow: #9baaae;
-  --overview: #f8faf7;
+  --line-soft: #aab5c3;
+  --shadow: #9aa7b8;
+  --overview: #fafbfe;
   --overview-ink: #172027;
   --overview-muted: #5c696e;
   --overview-line: #aebbc0;
@@ -57,7 +59,9 @@
   color: #e5eee8;
   background: #0a0e10;
   --bg: #0a0e10;
-  --grid: rgba(142, 165, 155, 0.07);
+  --bg-codex-glow: rgba(92, 122, 255, 0.16);
+  --bg-claude-glow: rgba(240, 180, 94, 0.1);
+  --bg-dot: rgba(184, 202, 211, 0.08);
   --ink: #e5eee8;
   --muted: #98aaa2;
   --quiet: #788a83;
@@ -101,9 +105,12 @@ body {
   overflow-x: hidden;
   background-color: var(--bg);
   background-image:
-    linear-gradient(var(--grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: 16px 16px;
+    radial-gradient(circle at 8% -8%, var(--bg-codex-glow), transparent 34rem),
+    radial-gradient(circle at 96% 4%, var(--bg-claude-glow), transparent 30rem),
+    linear-gradient(135deg, color-mix(in srgb, var(--surface) 58%, transparent), transparent 48%),
+    radial-gradient(circle, var(--bg-dot) 1px, transparent 1.2px);
+  background-size: auto, auto, auto, 22px 22px;
+  background-attachment: fixed;
   -webkit-font-smoothing: none;
   transition: color 120ms linear, background-color 120ms linear;
 }
@@ -1319,9 +1326,10 @@ footer svg {
   color: var(--muted);
   background-color: var(--bg);
   background-image:
-    linear-gradient(var(--grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: 16px 16px;
+    radial-gradient(circle at 28% 18%, var(--bg-codex-glow), transparent 30rem),
+    radial-gradient(circle at 76% 22%, var(--bg-claude-glow), transparent 26rem),
+    radial-gradient(circle, var(--bg-dot) 1px, transparent 1.2px);
+  background-size: auto, auto, 22px 22px;
 }
 
 .loading-mark { margin-bottom: 16px; }

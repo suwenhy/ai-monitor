@@ -108,48 +108,24 @@ svg {
 }
 
 .mini-header {
-  min-height: 54px;
+  min-height: 38px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 28px;
+  grid-template-columns: minmax(0, 1fr) 26px;
   align-items: center;
-  gap: 9px;
-  padding: 8px 9px;
+  gap: 8px;
+  padding: 4px 7px 4px 10px;
   background: var(--mini-surface-alt);
   border-bottom: 2px solid var(--mini-line);
   -webkit-app-region: drag;
   user-select: none;
 }
 
-.mini-brand-mark {
-  width: 32px;
-  height: 32px;
-  position: relative;
-  display: grid;
-  place-items: center;
-  color: var(--mini-surface);
-  background: var(--mini-ink);
-  border: 2px solid var(--mini-line);
-  box-shadow: 2px 2px 0 var(--mini-shadow);
+.mini-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
-
-.mini-brand-mark::before {
-  width: 18px;
-  height: 13px;
-  content: "";
-  border: 2px solid currentColor;
-}
-
-.mini-brand-mark i {
-  width: 3px;
-  height: 3px;
-  position: absolute;
-  top: 13px;
-  left: 10px;
-  background: currentColor;
-  box-shadow: 5px 2px 0 currentColor, 10px 2px 0 currentColor;
-}
-
-.mini-heading { min-width: 0; }
 
 .mini-heading strong,
 .mini-heading > span {
@@ -160,12 +136,13 @@ svg {
 }
 
 .mini-heading strong {
+  flex: 0 0 auto;
   font-size: 12px;
   font-weight: 400;
 }
 
 .mini-heading > span {
-  margin-top: 4px;
+  min-width: 0;
   color: var(--mini-muted);
   font-size: 12px;
 }
@@ -180,8 +157,8 @@ svg {
 }
 
 .mini-icon-button {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
   padding: 0;
@@ -282,6 +259,70 @@ svg {
   opacity: 0;
   transform: translateY(-5px);
 }
+
+.mini-allowances {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  padding: 1px;
+  background: var(--mini-line-soft);
+  border-bottom: 1px solid var(--mini-line-soft);
+}
+
+.mini-allowance {
+  min-width: 0;
+  padding: 7px 9px 8px;
+  background: var(--mini-surface);
+}
+
+.mini-allowance-heading,
+.mini-allowance-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+}
+
+.mini-allowance-heading span {
+  color: var(--mini-provider-color);
+  font-size: 11px;
+}
+
+.mini-allowance-heading strong {
+  color: var(--mini-ink);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.mini-allowance-track {
+  height: 4px;
+  margin: 5px 0 6px;
+  overflow: hidden;
+  background: var(--mini-surface-alt);
+  border: 1px solid var(--mini-line-soft);
+}
+
+.mini-allowance-track i {
+  height: 100%;
+  display: block;
+  background: var(--mini-provider-color);
+  transition: width 180ms steps(4, end);
+}
+
+.mini-allowance-meta {
+  color: var(--mini-quiet);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.mini-allowance-meta span,
+.mini-allowance-meta time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-allowance-meta time { color: var(--mini-muted); }
 
 .mini-content {
   min-height: 0;
@@ -505,6 +546,7 @@ svg {
 }
 
 @media (max-width: 360px) {
+  .mini-allowances { grid-template-columns: 1fr; }
   .mini-session { grid-template-columns: 38px minmax(0, 1fr) 52px; }
   .mini-provider-icon { width: 34px; height: 34px; }
   .mini-provider-icon img { width: 30px; height: 30px; }

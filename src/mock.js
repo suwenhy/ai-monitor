@@ -31,7 +31,7 @@ export const mockSnapshot = {
         updatedAt: new Date(now - 12_000).toISOString(),
         transcriptPath: "/Users/local/.codex/sessions/current.jsonl",
         usage: { inputTokens: 164820, outputTokens: 2840, cachedInputTokens: 102400, totalTokens: 167660, contextTokens: 164820, contextWindow: 258400 },
-        rateLimits: { primary: { usedPercent: 28 } },
+        rateLimits: { primary: { usedPercent: 28, windowMinutes: 10080, resetsAt: Math.floor((now + 3 * 24 * 60 * 60_000) / 1000) } },
       },
       {
         id: "codex-2",

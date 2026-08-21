@@ -43,6 +43,12 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "build/app-icon.png",
+        "to": "app-icon.png"
+      }
+    ],
     "mac": {
       "icon": "build/app-icon.icns",
       "category": "public.app-category.developer-tools",
