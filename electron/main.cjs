@@ -1125,13 +1125,34 @@ async function refreshSnapshot() {
   return refreshPromise;
 }
 
+function glassWindowOptions(fallbackColor, { frameless = false } = {}) {
+  if (process.platform === "darwin") {
+    return {
+      backgroundColor: "#00000000",
+      vibrancy: "under-window",
+      visualEffectState: "active",
+      ...(frameless ? { transparent: true } : { titleBarStyle: "hiddenInset" }),
+    };
+  }
+
+  if (process.platform === "win32") {
+    return {
+      backgroundColor: "#00FFFFFF",
+      backgroundMaterial: "acrylic",
+      ...(frameless ? { transparent: true } : {}),
+    };
+  }
+
+  return { backgroundColor: fallbackColor };
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 940,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: "#e9edf4",
+    ...glassWindowOptions("#e9edf4"),
     title: "AI Monitor",
     trafficLightPosition: { x: 18, y: 18 },
     webPreferences: {
@@ -1172,7 +1193,7 @@ function createMiniWindow() {
     resizable: true,
     maximizable: false,
     fullscreenable: false,
-    backgroundColor: "#f8faf7",
+    ...glassWindowOptions("#f8faf7", { frameless: true }),
     title: "AI Monitor Active Tasks",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),

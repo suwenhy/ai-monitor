@@ -10,16 +10,17 @@
   color-scheme: light;
   font-family: "Fusion Pixel", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
   font-synthesis: none;
-  --mini-bg: #dce4e5;
-  --mini-grid: rgba(45, 63, 68, 0.08);
+  --mini-bg: rgba(220, 228, 229, 0.3);
+  --mini-grid: rgba(45, 63, 68, 0.035);
   --mini-ink: #172027;
   --mini-muted: #657379;
   --mini-quiet: #849095;
-  --mini-surface: #f8faf7;
-  --mini-surface-alt: #e9efed;
-  --mini-line: #172027;
-  --mini-line-soft: #aebbc0;
-  --mini-shadow: #9baaae;
+  --mini-surface: rgba(248, 250, 247, 0.82);
+  --mini-surface-alt: rgba(233, 239, 237, 0.58);
+  --mini-line: rgba(23, 32, 39, 0.68);
+  --mini-line-soft: rgba(130, 146, 150, 0.5);
+  --mini-shadow: rgba(24, 38, 42, 0.22);
+  --mini-highlight: rgba(255, 255, 255, 0.48);
   --mini-codex: #405ff2;
   --mini-codex-soft: #dce5ff;
   --mini-claude: #d99a16;
@@ -34,16 +35,17 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --mini-bg: #0a0e10;
+  --mini-bg: rgba(10, 14, 16, 0.5);
   --mini-grid: rgba(142, 165, 155, 0.07);
   --mini-ink: #e5eee8;
   --mini-muted: #98aaa2;
   --mini-quiet: #788a83;
-  --mini-surface: #12181a;
-  --mini-surface-alt: #0e1416;
-  --mini-line: #a7bbb2;
-  --mini-line-soft: #35443f;
-  --mini-shadow: #000000;
+  --mini-surface: rgba(18, 24, 26, 0.82);
+  --mini-surface-alt: rgba(14, 20, 22, 0.68);
+  --mini-line: rgba(167, 187, 178, 0.72);
+  --mini-line-soft: rgba(74, 94, 87, 0.6);
+  --mini-shadow: rgba(0, 0, 0, 0.38);
+  --mini-highlight: rgba(255, 255, 255, 0.08);
   --mini-codex: #7f9dff;
   --mini-codex-soft: #182856;
   --mini-claude: #f0b45e;
@@ -70,11 +72,10 @@ body {
   min-height: 100vh;
   overflow: hidden;
   color: var(--mini-ink);
-  background-color: var(--mini-bg);
+  background-color: transparent;
   background-image:
-    linear-gradient(var(--mini-grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--mini-grid) 1px, transparent 1px);
-  background-size: 12px 12px;
+    radial-gradient(circle at 8% 0%, color-mix(in srgb, var(--mini-codex) 12%, transparent), transparent 58%),
+    radial-gradient(circle at 96% 100%, color-mix(in srgb, var(--mini-claude) 11%, transparent), transparent 54%);
   -webkit-font-smoothing: none;
 }
 
@@ -102,8 +103,10 @@ svg {
   overflow: hidden;
   flex-direction: column;
   background: var(--mini-surface);
-  border: 2px solid var(--mini-line);
-  box-shadow: 2px 2px 0 var(--mini-shadow);
+  border: 1px solid var(--mini-line);
+  box-shadow: 0 14px 34px var(--mini-shadow), inset 0 0 0 1px var(--mini-highlight);
+  -webkit-backdrop-filter: blur(18px) saturate(1.18);
+  backdrop-filter: blur(18px) saturate(1.18);
   transition: border-color 80ms linear, box-shadow 80ms linear;
 }
 
@@ -115,7 +118,7 @@ svg {
   gap: 6px;
   padding: 3px 5px 3px 8px;
   background: var(--mini-surface-alt);
-  border-bottom: 2px solid var(--mini-line);
+  border-bottom: 1px solid var(--mini-line);
   -webkit-app-region: drag;
   user-select: none;
 }
