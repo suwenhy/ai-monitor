@@ -23,10 +23,16 @@ const recentSessions = ref([]);
 const alertQueue = [];
 const recentSessionTimers = new Map();
 const RECENT_SESSION_DURATION_MS = 60_000;
+const ALLOWANCE_VISIBILITY_KEY = "ai-monitor-mini-allowances";
+const allowanceToggles = [
+  { id: "codex", label: "Codex" },
+  { id: "claude", label: "Claude" },
+];
 const theme = ref(
   localStorage.getItem("ai-monitor-theme")
     || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
 );
+const allowanceVisibility = ref(readAllowanceVisibility());
 let unsubscribe = null;
 let unsubscribeAlerts = null;
 let alertTimer = null;
@@ -35,6 +41,10 @@ let clockTimer = null;
 watch(theme, (value) => {
   document.documentElement.dataset.theme = value;
 }, { immediate: true });
+
+watch(allowanceVisibility, (value) => {
+  localStorage.setItem(ALLOWANCE_VISIBILITY_KEY, JSON.stringify(value));
+}, { deep: true });
 
 const activeSessions = computed(() => {
   if (!snapshot.value) return [];
@@ -63,6 +73,9 @@ const accountAllowances = computed(() => {
     .map((provider) => providerAllowance(provider));
 });
 
+const visibleAllowances = computed(() => accountAllowances.value
+  .filter((allowance) => allowanceVisibility.value[allowance.id]));
+
 const alertIcon = computed(() => {
   if (activeAlert.value?.type === "complete") return Check;
   if (activeAlert.value?.type === "waiting" || activeAlert.value?.type === "failed") return AlertTriangle;
@@ -71,6 +84,22 @@ const alertIcon = computed(() => {
 
 function providerIcon(providerId) {
   return providerId === "claude" ? claudePixel : codexPixel;
+}
+
+function readAllowanceVisibility() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(ALLOWANCE_VISIBILITY_KEY));
+    return {
+      codex: stored?.codex !== false,
+      claude: stored?.claude !== false,
+    };
+  } catch {
+    return { codex: true, claude: true };
+  }
+}
+
+function toggleAllowance(providerId) {
+  allowanceVisibility.value[providerId] = !allowanceVisibility.value[providerId];
 }
 
 function formatTokens(value) {
@@ -279,9 +308,23 @@ onUnmounted(() => {
           <strong>ACTIVE TASKS</strong>
           <span><i class="mini-live-dot"></i>{{ activeSessions.length }} 个进行中</span>
         </div>
-        <button class="mini-icon-button" aria-label="隐藏浮窗" title="隐藏浮窗" @click="closeMiniWindow">
-          <X />
-        </button>
+        <div class="mini-header-actions">
+          <button
+            v-for="provider in allowanceToggles"
+            :key="provider.id"
+            class="mini-allowance-toggle"
+            :class="[`mini-provider-${provider.id}`, { 'is-visible': allowanceVisibility[provider.id] }]"
+            :aria-label="`${allowanceVisibility[provider.id] ? '隐藏' : '显示'} ${provider.label} 剩余额度`"
+            :title="`${allowanceVisibility[provider.id] ? '隐藏' : '显示'} ${provider.label} 剩余额度`"
+            :aria-pressed="allowanceVisibility[provider.id]"
+            @click="toggleAllowance(provider.id)"
+          >
+            <img :src="providerIcon(provider.id)" alt="" />
+          </button>
+          <button class="mini-icon-button" aria-label="隐藏浮窗" title="隐藏浮窗" @click="closeMiniWindow">
+            <X />
+          </button>
+        </div>
       </header>
 
       <Transition name="mini-alert">
@@ -294,9 +337,14 @@ onUnmounted(() => {
         </div>
       </Transition>
 
-      <section v-if="accountAllowances.length" class="mini-allowances" aria-label="账号剩余用量">
+      <section
+        v-if="visibleAllowances.length"
+        class="mini-allowances"
+        :class="{ 'mini-allowances-single': visibleAllowances.length === 1 }"
+        aria-label="账号剩余用量"
+      >
         <article
-          v-for="allowance in accountAllowances"
+          v-for="allowance in visibleAllowances"
           :key="allowance.id"
           class="mini-allowance"
           :class="`mini-provider-${allowance.id}`"
@@ -361,10 +409,6 @@ onUnmounted(() => {
         </div>
       </main>
 
-      <footer class="mini-footer">
-        <span><i></i>置顶显示</span>
-        <time v-if="snapshot" :datetime="snapshot.refreshedAt">每 3 秒同步</time>
-      </footer>
     </section>
   </div>
 </template>

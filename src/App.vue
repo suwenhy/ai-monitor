@@ -176,7 +176,7 @@ function toggleOverview() {
 
 async function toggleMiniWindow() {
   if (!window.aiMonitor) {
-    window.open(`${window.location.origin}${window.location.pathname}?view=mini`, "ai-monitor-mini", "popup,width=390,height=320");
+    window.open(`${window.location.origin}${window.location.pathname}?view=mini`, "ai-monitor-mini", "popup,width=390,height=280");
     return;
   }
   const result = await window.aiMonitor.toggleMiniWindow();
