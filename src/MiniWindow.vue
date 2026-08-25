@@ -102,13 +102,13 @@ function providerAllowance(provider) {
   if (provider.id === "claude") {
     const sevenDay = provider.planUsage?.windows?.sevenDay;
     const fiveHour = provider.planUsage?.windows?.fiveHour;
-    const window = sevenDay || fiveHour;
+    const window = fiveHour || sevenDay;
     const remaining = finiteNumber(window?.remainingPercent);
     return {
       id: provider.id,
       label: "CLAUDE",
       remaining,
-      detail: sevenDay ? "7 天额度" : fiveHour ? "5 小时额度" : "账号用量未提供",
+      detail: fiveHour ? "5 小时额度" : sevenDay ? "7 天额度" : "账号用量未提供",
       resetAt: limitResetAt(window),
       stale: Boolean(provider.planUsage?.stale),
     };
