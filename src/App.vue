@@ -33,6 +33,7 @@ import {
   TriangleAlert,
 } from "@lucide/vue";
 import { mockSnapshot } from "./mock";
+import packageInfo from "../package.json";
 import claudePixel from "./assets/claude-prompt-pixel.svg";
 import codexPixel from "./assets/codex-console-pixel.svg";
 import stylesHref from "./styles.css?url";
@@ -55,6 +56,7 @@ const overviewVisible = ref(localStorage.getItem("ai-monitor-overview") !== "hid
 const miniVisible = ref(false);
 const openingSessionId = ref(null);
 const sessionNotice = ref(null);
+const appVersion = ref(packageInfo.version);
 const currentView = ref("monitor");
 const pathSettings = ref({
   schemaVersion: 1,
@@ -321,23 +323,30 @@ function numberFrom(value, ...keys) {
   return null;
 }
 
+function usedPercent(window) {
+  const used = numberFrom(window, "usedPercent", "used_percent");
+  if (used !== null) return Math.max(0, Math.min(100, used));
+  const remaining = numberFrom(window, "remainingPercent", "remaining_percent");
+  return remaining === null ? null : Math.max(0, Math.min(100, 100 - remaining));
+}
+
 function providerAllowance(provider) {
   if (provider.id === "claude" && provider.planUsage) {
-    const fiveHourRemaining = numberFrom(provider.planUsage.windows?.fiveHour, "remainingPercent");
-    const sevenDayRemaining = numberFrom(provider.planUsage.windows?.sevenDay, "remainingPercent");
-    const primaryRemaining = sevenDayRemaining ?? fiveHourRemaining;
+    const fiveHourUsed = usedPercent(provider.planUsage.windows?.fiveHour);
+    const sevenDayUsed = usedPercent(provider.planUsage.windows?.sevenDay);
+    const primaryUsed = sevenDayUsed ?? fiveHourUsed;
     const sampledAt = provider.planUsage.sampledAt
       ? relativeTime(provider.planUsage.sampledAt)
       : null;
     return {
-      label: "套餐剩余",
-      value: primaryRemaining === null ? "--" : `${Math.round(primaryRemaining)}%`,
-      helper: sevenDayRemaining === null ? "7 天用量未提供" : "7 天全部模型",
-      account: fiveHourRemaining === null
+      label: "套餐已用",
+      value: primaryUsed === null ? "--" : `${Math.round(primaryUsed)}%`,
+      helper: sevenDayUsed === null ? "7 天用量未提供" : "7 天全部模型",
+      account: fiveHourUsed === null
         ? (sampledAt ? `${sampledAt}采样` : "5 小时用量未提供")
-        : `5 小时剩余 ${Math.round(fiveHourRemaining)}%${provider.planUsage.stale ? " · 历史样本" : ""}`,
+        : `5 小时已用 ${Math.round(fiveHourUsed)}%${provider.planUsage.stale ? " · 历史样本" : ""}`,
       icon: Gauge,
-      progress: primaryRemaining,
+      progress: primaryUsed,
     };
   }
 
@@ -345,29 +354,29 @@ function providerAllowance(provider) {
     || provider.sessions[0];
   const contextWindow = Number(current?.usage?.contextWindow) || 0;
   const contextUsed = Number(current?.usage?.contextTokens ?? current?.usage?.inputTokens) || 0;
-  const remainingTokens = contextWindow ? Math.max(0, contextWindow - contextUsed) : null;
-  const contextRemainingPercent = remainingTokens === null
+  const usedTokens = contextWindow ? Math.max(0, contextUsed) : null;
+  const contextUsedPercent = usedTokens === null
     ? null
-    : Math.round((remainingTokens / contextWindow) * 100);
+    : Math.max(0, Math.min(100, Math.round((usedTokens / contextWindow) * 100)));
 
-  let accountRemainingPercent = null;
+  let accountUsedPercent = null;
   for (const session of provider.sessions) {
     const limits = session.rateLimits;
     const window = limits?.primary || limits?.secondary;
-    const usedPercent = numberFrom(window, "usedPercent", "used_percent");
-    if (usedPercent !== null) {
-      accountRemainingPercent = Math.max(0, Math.min(100, Math.round(100 - usedPercent)));
+    const percentage = usedPercent(window);
+    if (percentage !== null) {
+      accountUsedPercent = Math.round(percentage);
       break;
     }
   }
 
   return {
-    label: "剩余 Token",
-    value: remainingTokens === null ? "--" : formatTokens(remainingTokens),
-    helper: contextRemainingPercent === null ? "上下文未提供" : `上下文剩余 ${contextRemainingPercent}%`,
-    account: accountRemainingPercent === null ? "账号未提供" : `账号剩余 ${accountRemainingPercent}%`,
+    label: "已用 Token",
+    value: usedTokens === null ? "--" : formatTokens(usedTokens),
+    helper: contextUsedPercent === null ? "上下文未提供" : `上下文已用 ${contextUsedPercent}%`,
+    account: accountUsedPercent === null ? "账号未提供" : `账号已用 ${accountUsedPercent}%`,
     icon: Gauge,
-    progress: accountRemainingPercent ?? contextRemainingPercent,
+    progress: accountUsedPercent ?? contextUsedPercent,
   };
 }
 
@@ -452,6 +461,12 @@ onMounted(async () => {
       miniVisible.value = Boolean(miniState?.visible);
     } catch {
       miniVisible.value = false;
+    }
+    try {
+      const runtime = await window.aiMonitor.getRuntime();
+      if (runtime?.version) appVersion.value = runtime.version;
+    } catch {
+      // Keep the package.json version shown by the web preview fallback.
     }
   }
 });
@@ -786,7 +801,7 @@ onUnmounted(() => {
 
     <footer>
       <span><HardDrive />数据保留在本机</span>
-      <span>AI Monitor 0.1.0</span>
+      <span>AI Monitor {{ appVersion }}</span>
     </footer>
 
     <Transition name="notice-pop">

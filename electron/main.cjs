@@ -1258,7 +1258,11 @@ async function setMacDockIcon() {
 }
 
 ipcMain.handle("monitor:get-snapshot", () => refreshSnapshot());
-ipcMain.handle("monitor:get-runtime", () => ({ platform: process.platform, packaged: app.isPackaged }));
+ipcMain.handle("monitor:get-runtime", () => ({
+  platform: process.platform,
+  packaged: app.isPackaged,
+  version: app.getVersion(),
+}));
 ipcMain.handle("monitor:get-settings", () => loadMonitorSettings());
 ipcMain.handle("monitor:save-settings", async (_event, value) => {
   const result = await saveMonitorSettings(value);

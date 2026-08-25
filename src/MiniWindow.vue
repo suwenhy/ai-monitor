@@ -115,6 +115,13 @@ function finiteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function usedPercent(limit) {
+  const used = finiteNumber(limit?.usedPercent ?? limit?.used_percent);
+  if (used !== null) return Math.max(0, Math.min(100, used));
+  const remaining = finiteNumber(limit?.remainingPercent ?? limit?.remaining_percent);
+  return remaining === null ? null : Math.max(0, Math.min(100, 100 - remaining));
+}
+
 function limitResetAt(limit) {
   const raw = limit?.resetsAt ?? limit?.resets_at ?? limit?.resetAt ?? limit?.reset_at;
   if (raw === undefined || raw === null || raw === "") return null;
@@ -132,12 +139,12 @@ function providerAllowance(provider) {
     const sevenDay = provider.planUsage?.windows?.sevenDay;
     const fiveHour = provider.planUsage?.windows?.fiveHour;
     const window = fiveHour || sevenDay;
-    const remaining = finiteNumber(window?.remainingPercent);
+    const used = usedPercent(window);
     return {
       id: provider.id,
       label: "CLAUDE",
-      remaining,
-      detail: fiveHour ? "5 小时额度" : sevenDay ? "7 天额度" : "账号用量未提供",
+      used,
+      detail: fiveHour ? "5 小时已用" : sevenDay ? "7 天已用" : "账号用量未提供",
       resetAt: limitResetAt(window),
       stale: Boolean(provider.planUsage?.stale),
     };
@@ -145,13 +152,13 @@ function providerAllowance(provider) {
 
   const session = (provider.sessions || []).find((item) => item.rateLimits?.primary || item.rateLimits?.secondary);
   const limit = session?.rateLimits?.primary || session?.rateLimits?.secondary;
-  const used = finiteNumber(limit?.usedPercent ?? limit?.used_percent);
+  const used = usedPercent(limit);
   const windowMinutes = finiteNumber(limit?.windowMinutes ?? limit?.window_minutes);
   return {
     id: provider.id,
     label: "CODEX",
-    remaining: used === null ? null : Math.max(0, Math.min(100, 100 - used)),
-    detail: windowMinutes ? `${Math.round(windowMinutes / 60 / 24)} 天额度` : "账号用量未提供",
+    used,
+    detail: windowMinutes ? `${Math.round(windowMinutes / 60 / 24)} 天已用` : "账号用量未提供",
     resetAt: limitResetAt(limit),
     stale: false,
   };
@@ -314,8 +321,8 @@ onUnmounted(() => {
             :key="provider.id"
             class="mini-allowance-toggle"
             :class="[`mini-provider-${provider.id}`, { 'is-visible': allowanceVisibility[provider.id] }]"
-            :aria-label="`${allowanceVisibility[provider.id] ? '隐藏' : '显示'} ${provider.label} 剩余额度`"
-            :title="`${allowanceVisibility[provider.id] ? '隐藏' : '显示'} ${provider.label} 剩余额度`"
+            :aria-label="`${allowanceVisibility[provider.id] ? '隐藏' : '显示'} ${provider.label} 用量`"
+            :title="`${allowanceVisibility[provider.id] ? '隐藏' : '显示'} ${provider.label} 用量`"
             :aria-pressed="allowanceVisibility[provider.id]"
             @click="toggleAllowance(provider.id)"
           >
@@ -341,7 +348,7 @@ onUnmounted(() => {
         v-if="visibleAllowances.length"
         class="mini-allowances"
         :class="{ 'mini-allowances-single': visibleAllowances.length === 1 }"
-        aria-label="账号剩余用量"
+        aria-label="账号用量"
       >
         <article
           v-for="allowance in visibleAllowances"
@@ -351,10 +358,10 @@ onUnmounted(() => {
         >
           <div class="mini-allowance-heading">
             <span>{{ allowance.label }}</span>
-            <strong>{{ allowance.remaining === null ? "--" : `${Math.round(allowance.remaining)}%` }}</strong>
+            <strong>{{ allowance.used === null ? "--" : `${Math.round(allowance.used)}%` }}</strong>
           </div>
           <div class="mini-allowance-track" aria-hidden="true">
-            <i :style="{ width: `${allowance.remaining ?? 0}%` }"></i>
+            <i :style="{ width: `${allowance.used ?? 0}%` }"></i>
           </div>
           <div class="mini-allowance-meta">
             <span>{{ allowance.detail }}{{ allowance.stale ? " · 历史" : "" }}</span>
