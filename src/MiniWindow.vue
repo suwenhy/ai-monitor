@@ -150,15 +150,31 @@ function providerAllowance(provider) {
     };
   }
 
-  const session = (provider.sessions || []).find((item) => item.rateLimits?.primary || item.rateLimits?.secondary);
-  const limit = session?.rateLimits?.primary || session?.rateLimits?.secondary;
+  const limits = (provider.sessions || []).flatMap((session) => [
+    session.rateLimits?.primary,
+    session.rateLimits?.secondary,
+  ]).filter(Boolean);
+  const fiveHour = limits.find((limit) => (
+    finiteNumber(limit?.windowMinutes ?? limit?.window_minutes) === 5 * 60
+  ));
+  const sevenDay = limits.find((limit) => (
+    finiteNumber(limit?.windowMinutes ?? limit?.window_minutes) === 7 * 24 * 60
+  ));
+  const limit = fiveHour || sevenDay || limits[0];
   const used = usedPercent(limit);
   const windowMinutes = finiteNumber(limit?.windowMinutes ?? limit?.window_minutes);
+  const detail = fiveHour
+    ? "5 小时已用"
+    : sevenDay
+      ? "7 天已用"
+      : windowMinutes
+        ? `${Math.round(windowMinutes / 60)} 小时已用`
+        : "账号用量未提供";
   return {
     id: provider.id,
     label: "CODEX",
     used,
-    detail: windowMinutes ? `${Math.round(windowMinutes / 60 / 24)} 天已用` : "账号用量未提供",
+    detail,
     resetAt: limitResetAt(limit),
     stale: false,
   };
